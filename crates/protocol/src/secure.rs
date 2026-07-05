@@ -8,7 +8,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::{KeyEvent, WIRE_LEN};
+use crate::{InputEvent, INPUT_MAX_LEN};
 
 const NOISE_PARAMS: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 const MAX_FRAME: usize = 65535; // Noise mesaj tavanı (snow::constants::MAXMSGLEN)
@@ -103,32 +103,29 @@ pub fn handshake_responder<S: Read + Write>(
     hs.into_transport_mode().map_err(noise_err)
 }
 
-/// KeyEvent::write_framed'in şifreli karşılığı: 5 baytı şifrele, ciphertext'i çerçevele.
+/// Şifreli gönderim: InputEvent'i (Key veya fare) kodla, şifrele, çerçevele.
 pub fn send_event<S: Write>(
     t: &mut snow::TransportState,
     s: &mut S,
-    ev: &KeyEvent,
+    ev: &InputEvent,
 ) -> io::Result<()> {
-    let plain = ev.encode(); // mevcut [u8; WIRE_LEN]
-    let mut ct = [0u8; WIRE_LEN + 16]; // düz metin + 16 baytlık Poly1305 tag
-    let n = t.write_message(&plain, &mut ct).map_err(noise_err)?;
+    let (plain, plen) = ev.encode(); // ([u8; INPUT_MAX_LEN], usize)
+    let mut ct = [0u8; INPUT_MAX_LEN + 16]; // düz metin + 16 baytlık Poly1305 tag
+    let n = t.write_message(&plain[..plen], &mut ct).map_err(noise_err)?;
     write_frame(s, &ct[..n])
 }
 
-/// KeyEvent::read_framed'in şifreli karşılığı. Nonce = Noise transport sayacı:
-/// snow sırasız/tekrarlanan çerçeveleri otomatik reddeder (replay koruması bedava).
-/// Bağlantı kapanırsa içteki read_exact eskisi gibi UnexpectedEof döner.
+/// Şifreli alım. Nonce = Noise transport sayacı: snow sırasız/tekrar çerçeveleri
+/// otomatik reddeder (replay koruması bedava). Kapanırsa read_exact UnexpectedEof döner.
+/// Uzunluk doğrulaması artık varyant-bazlı InputEvent::decode içinde.
 pub fn recv_event<S: Read>(
     t: &mut snow::TransportState,
     s: &mut S,
-) -> io::Result<KeyEvent> {
-    let mut frame = [0u8; WIRE_LEN + 16];
+) -> io::Result<InputEvent> {
+    let mut frame = [0u8; INPUT_MAX_LEN + 16];
     let n = read_frame(s, &mut frame)?;
-    let mut plain = [0u8; WIRE_LEN + 16];
+    let mut plain = [0u8; INPUT_MAX_LEN + 16];
     let m = t.read_message(&frame[..n], &mut plain).map_err(noise_err)?;
-    if m < WIRE_LEN {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "kısa açık metin"));
-    }
-    KeyEvent::decode(&plain[..m])
+    InputEvent::decode(&plain[..m])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("çözme hatası: {e:?}")))
 }

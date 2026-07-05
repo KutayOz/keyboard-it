@@ -15,7 +15,7 @@ mod keymap;
 
 use std::io;
 
-use protocol::{KeyEvent, MsgType, DEFAULT_PORT};
+use protocol::{InputEvent, KeyEvent, MsgType, DEFAULT_PORT};
 
 fn normalize_addr(arg: &str) -> String {
     if arg.contains(':') {
@@ -77,10 +77,10 @@ fn send_hello(addr: &str) -> io::Result<()> {
     for c in "hello".chars() {
         let hid = 0x04 + (c as u16 - 'a' as u16); // a-z -> HID usage
         protocol::secure::send_event(&mut t, &mut stream,
-            &KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 })?;
+            &InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }))?;
         sleep(Duration::from_millis(15));
         protocol::secure::send_event(&mut t, &mut stream,
-            &KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 })?;
+            &InputEvent::Key(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }))?;
         sleep(Duration::from_millis(40));
     }
     println!("gönderildi.");

@@ -45,6 +45,7 @@ pub const WIRE_LEN: usize = 5;
 pub enum DecodeError {
     ShortBuffer,
     BadMsgType(u8),
+    BadTag(u8),
 }
 
 impl KeyEvent {
@@ -78,6 +79,105 @@ pub mod modmask {
     pub const RIGHT_SHIFT: u16 = 1 << 5;
     pub const RIGHT_ALT: u16 = 1 << 6;
     pub const RIGHT_GUI: u16 = 1 << 7;
+}
+
+// ===== Birleşik giriş olayı: KeyEvent'i sarar + fare varyantları =====
+
+/// Tel üzerindeki InputEvent varyantını belirleyen etiket baytı.
+pub mod tag {
+    pub const KEY: u8 = 0;
+    pub const MOUSE_MOVE: u8 = 1;
+    pub const MOUSE_BUTTON: u8 = 2;
+    pub const SCROLL: u8 = 3;
+}
+
+/// Fare butonu kimliği (küçük tam sayı; tel ve her iki taraf için ortak).
+pub mod mousebtn {
+    pub const LEFT: u8 = 0;
+    pub const RIGHT: u8 = 1;
+    pub const MIDDLE: u8 = 2;
+}
+
+/// Birleşik giriş olayı. Mevcut KeyEvent aynen sarılır; fare varyantları eklenir.
+/// Hareket RELATİFtir (delta): mutlak Mac koordinatları Windows'ta anlamsız.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InputEvent {
+    Key(KeyEvent),
+    MouseMove { dx: i16, dy: i16 },
+    MouseButton { button: u8, down: bool }, // button: mousebtn::*
+    Scroll { dx: i8, dy: i8 },              // dy: dikey, dx: yatay (tick sayısı)
+}
+
+/// En büyük olası kodlama: 1 etiket baytı + 5 baytlık Key payload'u.
+pub const INPUT_MAX_LEN: usize = 1 + WIRE_LEN; // = 6
+
+impl InputEvent {
+    /// Sabit tampona kodla; (buf, kullanılan_uzunluk) döner. Heap yok.
+    pub fn encode(&self) -> ([u8; INPUT_MAX_LEN], usize) {
+        let mut b = [0u8; INPUT_MAX_LEN];
+        let len = match self {
+            InputEvent::Key(k) => {
+                b[0] = tag::KEY;
+                b[1..1 + WIRE_LEN].copy_from_slice(&k.encode());
+                1 + WIRE_LEN
+            }
+            InputEvent::MouseMove { dx, dy } => {
+                b[0] = tag::MOUSE_MOVE;
+                b[1..3].copy_from_slice(&dx.to_be_bytes());
+                b[3..5].copy_from_slice(&dy.to_be_bytes());
+                5
+            }
+            InputEvent::MouseButton { button, down } => {
+                b[0] = tag::MOUSE_BUTTON;
+                b[1] = *button;
+                b[2] = *down as u8;
+                3
+            }
+            InputEvent::Scroll { dx, dy } => {
+                b[0] = tag::SCROLL;
+                b[1] = *dx as u8; // i8 -> u8 bit-koruyan
+                b[2] = *dy as u8;
+                3
+            }
+        };
+        (b, len)
+    }
+
+    /// İlk etiket baytından çöz; her varyant kendi uzunluğunu doğrular.
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let (&t, rest) = buf.split_first().ok_or(DecodeError::ShortBuffer)?;
+        match t {
+            tag::KEY => Ok(InputEvent::Key(KeyEvent::decode(rest)?)),
+            tag::MOUSE_MOVE => {
+                if rest.len() < 4 {
+                    return Err(DecodeError::ShortBuffer);
+                }
+                Ok(InputEvent::MouseMove {
+                    dx: i16::from_be_bytes([rest[0], rest[1]]),
+                    dy: i16::from_be_bytes([rest[2], rest[3]]),
+                })
+            }
+            tag::MOUSE_BUTTON => {
+                if rest.len() < 2 {
+                    return Err(DecodeError::ShortBuffer);
+                }
+                Ok(InputEvent::MouseButton {
+                    button: rest[0],
+                    down: rest[1] != 0,
+                })
+            }
+            tag::SCROLL => {
+                if rest.len() < 2 {
+                    return Err(DecodeError::ShortBuffer);
+                }
+                Ok(InputEvent::Scroll {
+                    dx: rest[0] as i8,
+                    dy: rest[1] as i8,
+                })
+            }
+            other => Err(DecodeError::BadTag(other)),
+        }
+    }
 }
 
 /// mac-sender'ın bağlanacağı, win-receiver'ın dinleyeceği varsayılan TCP portu.
@@ -130,6 +230,29 @@ mod tests {
     #[test]
     fn short_buffer_errors() {
         assert_eq!(KeyEvent::decode(&[0u8; 3]), Err(DecodeError::ShortBuffer));
+    }
+
+    #[test]
+    fn input_event_roundtrip() {
+        let cases = [
+            InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: 0x04, modifiers: modmask::LEFT_SHIFT }),
+            InputEvent::MouseMove { dx: i16::MIN, dy: i16::MAX },
+            InputEvent::MouseMove { dx: -1, dy: 7 },
+            InputEvent::MouseButton { button: mousebtn::RIGHT, down: true },
+            InputEvent::MouseButton { button: mousebtn::MIDDLE, down: false },
+            InputEvent::Scroll { dx: -128, dy: 127 },
+        ];
+        for ev in cases {
+            let (buf, len) = ev.encode();
+            assert!(len <= INPUT_MAX_LEN);
+            assert_eq!(InputEvent::decode(&buf[..len]).unwrap(), ev);
+        }
+    }
+
+    #[test]
+    fn input_event_bad_tag() {
+        assert_eq!(InputEvent::decode(&[9u8, 0, 0]), Err(DecodeError::BadTag(9)));
+        assert_eq!(InputEvent::decode(&[]), Err(DecodeError::ShortBuffer));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::io;
 use std::net::TcpListener;
 
-use protocol::{KeyEvent, MsgType, DEFAULT_PORT};
+use protocol::{InputEvent, KeyEvent, MsgType, DEFAULT_PORT};
 
 mod inject;
 mod scancode;
@@ -51,21 +51,36 @@ fn main() -> io::Result<()> {
             }
         };
 
-        // Bu bağlantıda basılı tuşları izle; kopunca hepsini bırak (stuck-key önleme).
+        // Bu bağlantıda basılı tuşları VE fare butonlarını izle; kopunca hepsini bırak.
         let mut held: HashSet<u16> = HashSet::new();
+        let mut held_btns: HashSet<u8> = HashSet::new();
         loop {
             match protocol::secure::recv_event(&mut transport, &mut stream) {
-                Ok(ev) => {
-                    match ev.msg {
-                        MsgType::Down | MsgType::Repeat => {
-                            held.insert(ev.hid_usage);
+                Ok(ev) => match ev {
+                    InputEvent::Key(ke) => {
+                        match ke.msg {
+                            MsgType::Down | MsgType::Repeat => {
+                                held.insert(ke.hid_usage);
+                            }
+                            MsgType::Up => {
+                                held.remove(&ke.hid_usage);
+                            }
                         }
-                        MsgType::Up => {
-                            held.remove(&ev.hid_usage);
-                        }
+                        inject::handle(ke);
                     }
-                    inject::handle(ev);
-                }
+                    InputEvent::MouseButton { button, down } => {
+                        if down {
+                            held_btns.insert(button);
+                        } else {
+                            held_btns.remove(&button);
+                        }
+                        inject::handle_mouse(ev);
+                    }
+                    // Hareket ve scroll relatiftir: izleme gerekmez.
+                    InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } => {
+                        inject::handle_mouse(ev);
+                    }
+                },
                 Err(e) => {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
                         println!("bağlantı kapandı: {peer:?}");
@@ -75,6 +90,10 @@ fn main() -> io::Result<()> {
                     // Kalan basılı tuşları bırak — yoksa Windows'ta (çoğunlukla bir modifier) takılır.
                     for hid in held.drain() {
                         inject::handle(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
+                    }
+                    // Kalan basılı fare butonlarını da bırak.
+                    for button in held_btns.drain() {
+                        inject::handle_mouse(InputEvent::MouseButton { button, down: false });
                     }
                     break;
                 }

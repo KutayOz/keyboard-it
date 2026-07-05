@@ -28,7 +28,7 @@ use core_graphics::event::{
     CGEventTapPlacement, CGEventType, CallbackResult, EventField,
 };
 
-use protocol::{KeyEvent, MsgType};
+use protocol::{mousebtn, InputEvent, KeyEvent, MsgType};
 
 use crate::keymap::mac_keycode_to_hid;
 use crate::net::connect_retry;
@@ -73,7 +73,7 @@ pub fn run(addr: String) -> io::Result<()> {
     println!("(Çıkış: Ctrl-C — ya da kilitlenirsen fareyle  > Force Quit.)");
 
     // Callback hafif kalsın: olayları kanala koy; ayrı thread TCP'ye framed yazar.
-    let (tx, rx) = mpsc::channel::<KeyEvent>();
+    let (tx, rx) = mpsc::channel::<InputEvent>();
     thread::spawn(move || {
         // İlk bağlantı ana thread'den geldi; kopmalarda OTOMATİK yeniden bağlan.
         // (TransportState: Send — bu thread'e taşınabiliyor.)
@@ -126,6 +126,20 @@ pub fn run(addr: String) -> io::Result<()> {
             CGEventType::KeyDown,
             CGEventType::KeyUp,
             CGEventType::FlagsChanged,
+            // fare: hareket (düz + buton basılıyken drag)
+            CGEventType::MouseMoved,
+            CGEventType::LeftMouseDragged,
+            CGEventType::RightMouseDragged,
+            CGEventType::OtherMouseDragged,
+            // fare: butonlar
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            // fare: scroll
+            CGEventType::ScrollWheel,
         ],
         move |_proxy, event_type, event: &CGEvent| -> CallbackResult {
             // Sistem tap'i devre dışı bıraktıysa (timeout/user-input) sadece geçir.
@@ -155,7 +169,11 @@ pub fn run(addr: String) -> io::Result<()> {
                             // PASİF'e dönüş: Windows'ta basılı kalan tuşları serbest bırak.
                             let held: Vec<u16> = st.held.drain().collect();
                             for hid in held {
-                                let _ = tx.send(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
+                                let _ = tx.send(InputEvent::Key(KeyEvent {
+                                    msg: MsgType::Up,
+                                    hid_usage: hid,
+                                    modifiers: 0,
+                                }));
                             }
                             println!("<<< PASİF — klavye tekrar Mac'te.");
                         }
@@ -180,14 +198,14 @@ pub fn run(addr: String) -> io::Result<()> {
                     if repeat == 0 {
                         if let Some(hid) = mac_keycode_to_hid(kc) {
                             st.held.insert(hid);
-                            let _ = tx.send(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 });
+                            let _ = tx.send(InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }));
                         }
                     }
                 }
                 CGEventType::KeyUp => {
                     if let Some(hid) = mac_keycode_to_hid(kc) {
                         st.held.remove(&hid);
-                        let _ = tx.send(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
+                        let _ = tx.send(InputEvent::Key(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }));
                     }
                 }
                 CGEventType::FlagsChanged => {
@@ -199,12 +217,61 @@ pub fn run(addr: String) -> io::Result<()> {
                             st.held.remove(&hid);
                         }
                         let msg = if down { MsgType::Down } else { MsgType::Up };
-                        let _ = tx.send(KeyEvent { msg, hid_usage: hid, modifiers: 0 });
+                        let _ = tx.send(InputEvent::Key(KeyEvent { msg, hid_usage: hid, modifiers: 0 }));
                     }
                 }
+
+                // --- fare: RELATİF hareket (delta yalnızca move/drag'de anlamlı) ---
+                CGEventType::MouseMoved
+                | CGEventType::LeftMouseDragged
+                | CGEventType::RightMouseDragged
+                | CGEventType::OtherMouseDragged => {
+                    let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
+                    let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
+                    let dx = dx.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+                    let dy = dy.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+                    if dx != 0 || dy != 0 {
+                        let _ = tx.send(InputEvent::MouseMove { dx, dy });
+                    }
+                }
+
+                // --- fare: sol/sağ butonlar (kendi olay tipleri) ---
+                CGEventType::LeftMouseDown => {
+                    let _ = tx.send(InputEvent::MouseButton { button: mousebtn::LEFT, down: true });
+                }
+                CGEventType::LeftMouseUp => {
+                    let _ = tx.send(InputEvent::MouseButton { button: mousebtn::LEFT, down: false });
+                }
+                CGEventType::RightMouseDown => {
+                    let _ = tx.send(InputEvent::MouseButton { button: mousebtn::RIGHT, down: true });
+                }
+                CGEventType::RightMouseUp => {
+                    let _ = tx.send(InputEvent::MouseButton { button: mousebtn::RIGHT, down: false });
+                }
+
+                // --- fare: diğer butonlar (orta = numara 2; ekstralar şimdilik atlanır) ---
+                CGEventType::OtherMouseDown | CGEventType::OtherMouseUp => {
+                    let num = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
+                    let down = matches!(event_type, CGEventType::OtherMouseDown);
+                    if num == 2 {
+                        let _ = tx.send(InputEvent::MouseButton { button: mousebtn::MIDDLE, down });
+                    }
+                }
+
+                // --- fare: scroll. Axis1=dikey, Axis2=yatay (tam-sayı tick). ---
+                CGEventType::ScrollWheel => {
+                    let v = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
+                    let h = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
+                    let dy = v.clamp(i8::MIN as i64, i8::MAX as i64) as i8;
+                    let dx = h.clamp(i8::MIN as i64, i8::MAX as i64) as i8;
+                    if dx != 0 || dy != 0 {
+                        let _ = tx.send(InputEvent::Scroll { dx, dy });
+                    }
+                }
+
                 _ => {}
             }
-            CallbackResult::Drop // AKTİF iken tüm tuşları Mac'ten bastır
+            CallbackResult::Drop // AKTİF iken tüm klavye+fare olaylarını Mac'ten bastır
         },
     )
     .map_err(|_| {
