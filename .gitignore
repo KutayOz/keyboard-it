@@ -1,0 +1,12 @@
+# Rust
+/target
+**/target
+
+# macOS
+.DS_Store
+
+# kalfa eklentisi durum dosyaları (bu projeye ait değil)
+.kalfa/
+**/.kalfa/
+
+# Cargo.lock: binary/uygulama olduğu için commit EDİLİR (bilerek ignore edilmedi).
