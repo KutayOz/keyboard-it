@@ -1,17 +1,26 @@
-//! macOS klavye yakalama: CGEventTap ile keyDown/keyUp/flagsChanged dinler,
-//! her tuşu HID usage'a çevirip TCP kanalına koyar. Ayrı bir thread bunları
-//! win-receiver'a framed olarak gönderir.
+//! macOS klavye yakalama + çift-tıklama-Fn toggle (M3).
 //!
-//! M2: yakala + çevir + ilet, SÜREKLİ AÇIK ve BASTIRMADAN (ListenOnly) — yani
-//! yazdıkların hem Mac'te hem Windows'ta görünür. Bastırma + çift-tıklama-Fn
-//! toggle M3'te gelecek.
+//! Durum makinesi:
+//!   - PASİF (başlangıç): tuşlar Mac'te normal çalışır, Windows'a GÖNDERİLMEZ.
+//!   - AKTİF: her tuş HID'e çevrilip Windows'a gider VE Mac'te BASTIRILIR (Drop).
+//! Aç/kapa: Fn'e ~400 ms içinde iki kez basmak (çift-tıklama).
 //!
-//! İzin: Sistem Ayarları > Gizlilik ve Güvenlik > "Giriş İzleme" (Input Monitoring)
-//! altında bu programı çalıştıran uygulamaya (ör. Terminal) izin verilmeli.
+//! İZİNLER (ikisi de gerekli):
+//!   - Giriş İzleme (Input Monitoring): olayları görmek için.
+//!   - Erişilebilirlik (Accessibility): AKTİF iken tuşları bastırmak (Drop) için.
+//! ÖN KOŞUL: Sistem Ayarları > Klavye > "🌐/fn tuşuna basınca: Hiçbir şey yapma"
+//!   (yoksa macOS çift-Fn'i Dikte için yer ve toggle'ı yiyebilir).
+//!
+//! GÜVENLİK: AKTİF iken Mac klavyesi bastırıldığından, kilitlenirsen fare hâlâ
+//! çalışır — menüden  > Force Quit ile terminali kapatabilirsin. Çift-Fn ile de
+//! her zaman PASİF'e dönersin.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io;
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
@@ -24,30 +33,39 @@ use protocol::{KeyEvent, MsgType};
 use crate::keymap::mac_keycode_to_hid;
 use crate::net::connect_retry;
 
-/// Bir modifier keycode'un down/up durumunu belirlemek için ilgili CGEventFlags maskesi.
-/// (Modifierlar keyDown değil, flagsChanged olarak gelir.)
+const FN_KEYCODE: i64 = 0x3F; // kVK_Function (Fn / 🌐 Globe)
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
+
+/// Bir modifier keycode'un down/up durumunu belirleyen CGEventFlags maskesi.
 fn modifier_mask(kc: i64) -> Option<CGEventFlags> {
     let m = match kc {
-        0x37 | 0x36 => CGEventFlags::CGEventFlagCommand,   // Left/Right Command
-        0x38 | 0x3C => CGEventFlags::CGEventFlagShift,     // Left/Right Shift
-        0x3A | 0x3D => CGEventFlags::CGEventFlagAlternate, // Left/Right Option
-        0x3B | 0x3E => CGEventFlags::CGEventFlagControl,   // Left/Right Control
-        0x39 => CGEventFlags::CGEventFlagAlphaShift,       // CapsLock
+        0x37 | 0x36 => CGEventFlags::CGEventFlagCommand,
+        0x38 | 0x3C => CGEventFlags::CGEventFlagShift,
+        0x3A | 0x3D => CGEventFlags::CGEventFlagAlternate,
+        0x3B | 0x3E => CGEventFlags::CGEventFlagControl,
+        0x39 => CGEventFlags::CGEventFlagAlphaShift,
         _ => return None,
     };
     Some(m)
 }
 
+struct State {
+    active: bool,
+    fn_down: bool,
+    last_fn_press: Option<Instant>,
+    held: HashSet<u16>, // AKTİF iken Windows'a Down gönderilmiş HID usage'lar
+}
+
 pub fn run(addr: String) -> io::Result<()> {
     println!("bağlanılıyor: {addr}");
     let mut stream = connect_retry(&addr)?;
-    println!("bağlandı. Klavye yakalanıyor — yazdıkların Windows'a gidecek.");
-    println!("(İZİN gerekli: Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme.)");
-    println!("(Çıkış: Ctrl-C)");
+    println!("bağlandı.");
+    println!("Durum: PASİF. Aç/kapa için Fn'e çift bas.");
+    println!("(İzin: Giriş İzleme + Erişilebilirlik. Ön koşul: fn tuşu 'Hiçbir şey yapma'.)");
+    println!("(Çıkış: Ctrl-C — ya da kilitlenirsen fareyle  > Force Quit.)");
 
-    // Callback hafif kalsın diye olayları kanala koy; ayrı thread TCP'ye yazar.
+    // Callback hafif kalsın: olayları kanala koy; ayrı thread TCP'ye framed yazar.
     let (tx, rx) = mpsc::channel::<KeyEvent>();
-
     thread::spawn(move || {
         for ev in rx {
             if ev.write_framed(&mut stream).is_err() {
@@ -57,46 +75,109 @@ pub fn run(addr: String) -> io::Result<()> {
         }
     });
 
+    let state = RefCell::new(State {
+        active: false,
+        fn_down: false,
+        last_fn_press: None,
+        held: HashSet::new(),
+    });
+
     let tap = CGEventTap::new(
         CGEventTapLocation::HID,
         CGEventTapPlacement::HeadInsertEventTap,
-        // M2: bastırma YOK — sadece dinle. (M3'te aktif tap + bastırma.)
-        CGEventTapOptions::ListenOnly,
+        // AKTİF tap: callback'ten Drop dönerek tuşu yutabiliriz (Accessibility gerekir).
+        CGEventTapOptions::Default,
         vec![
             CGEventType::KeyDown,
             CGEventType::KeyUp,
             CGEventType::FlagsChanged,
         ],
-        move |_proxy, event_type, event: &CGEvent| {
+        move |_proxy, event_type, event: &CGEvent| -> CallbackResult {
+            // Sistem tap'i devre dışı bıraktıysa (timeout/user-input) sadece geçir.
+            if matches!(
+                event_type,
+                CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+            ) {
+                eprintln!("uyarı: event tap devre dışı ({event_type:?}) — gerekirse yeniden başlat.");
+                return CallbackResult::Keep;
+            }
+
             let kc = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+            let mut st = state.borrow_mut();
+
+            // --- Fn tuşu: çift-tıklama toggle algılama (durumdan bağımsız her zaman) ---
+            if kc == FN_KEYCODE {
+                let now_down = event.get_flags().contains(CGEventFlags::CGEventFlagSecondaryFn);
+                if now_down && !st.fn_down {
+                    // rising edge = bir "tık"
+                    let is_double = matches!(st.last_fn_press, Some(t) if t.elapsed() <= DOUBLE_TAP);
+                    if is_double {
+                        st.last_fn_press = None;
+                        st.active = !st.active;
+                        if st.active {
+                            println!(">>> AKTİF — klavye Windows'a gidiyor (Mac'te bastırılıyor).");
+                        } else {
+                            // PASİF'e dönüş: Windows'ta basılı kalan tuşları serbest bırak.
+                            let held: Vec<u16> = st.held.drain().collect();
+                            for hid in held {
+                                let _ = tx.send(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
+                            }
+                            println!("<<< PASİF — klavye tekrar Mac'te.");
+                        }
+                    } else {
+                        st.last_fn_press = Some(Instant::now());
+                    }
+                }
+                st.fn_down = now_down;
+                // Fn'in kendisi Windows'a gitmez (HID yok). AKTİF iken tüket, PASİF iken geçir.
+                return if st.active { CallbackResult::Drop } else { CallbackResult::Keep };
+            }
+
+            // --- PASİF: Mac normal çalışsın, gönderme, bastırma ---
+            if !st.active {
+                return CallbackResult::Keep;
+            }
+
+            // --- AKTİF: çevir + gönder + bastır ---
             match event_type {
                 CGEventType::KeyDown => {
-                    // Otomatik tekrarları atla — Windows kendi tekrarını üretsin.
                     let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT);
                     if repeat == 0 {
                         if let Some(hid) = mac_keycode_to_hid(kc) {
+                            st.held.insert(hid);
                             let _ = tx.send(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 });
                         }
                     }
                 }
                 CGEventType::KeyUp => {
                     if let Some(hid) = mac_keycode_to_hid(kc) {
+                        st.held.remove(&hid);
                         let _ = tx.send(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
                     }
                 }
                 CGEventType::FlagsChanged => {
                     if let (Some(hid), Some(mask)) = (mac_keycode_to_hid(kc), modifier_mask(kc)) {
                         let down = event.get_flags().contains(mask);
+                        if down {
+                            st.held.insert(hid);
+                        } else {
+                            st.held.remove(&hid);
+                        }
                         let msg = if down { MsgType::Down } else { MsgType::Up };
                         let _ = tx.send(KeyEvent { msg, hid_usage: hid, modifiers: 0 });
                     }
                 }
                 _ => {}
             }
-            CallbackResult::Keep // ListenOnly: dönüş yok sayılır; olayı değiştirmiyoruz.
+            CallbackResult::Drop // AKTİF iken tüm tuşları Mac'ten bastır
         },
     )
-    .map_err(|_| io::Error::new(io::ErrorKind::Other, "CGEventTap oluşturulamadı (Giriş İzleme izni verildi mi?)"))?;
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "CGEventTap oluşturulamadı (Giriş İzleme + Erişilebilirlik izni verildi mi?)",
+        )
+    })?;
 
     let source = tap
         .mach_port()
@@ -107,7 +188,7 @@ pub fn run(addr: String) -> io::Result<()> {
         CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
     }
     tap.enable();
-    println!("hazır — yaz!");
-    CFRunLoop::run_current(); // bloklar
+    println!("hazır. Fn'e çift bas → AKTİF; tekrar çift bas → PASİF.");
+    CFRunLoop::run_current();
     Ok(())
 }
