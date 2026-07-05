@@ -25,13 +25,26 @@ Mac: dahili klavye -> CGEventTap (yakala + Fn toggle) -> HID usage'a çevir
 - **M3 (kod hazır):** çift-tıklama-Fn ile aç/kapa + aktifken Mac'te bastırma.
   Canlı test: PASİF başlar, Fn'e çift bas → AKTİF (Windows'a gider), tekrar → PASİF.
 
-## M3'ü çalıştır (asıl özellik)
+## Şifreleme (zorunlu)
+
+Trafik Noise (`NNpsk0`) ile şifreli + karşılıklı doğrulanır. **İki makinede de AYNI
+`KEYBOARD_IT_KEY` parolası** ayarlı olmalı; yoksa program açılmaz, yanlışsa bağlantı reddedilir.
+
+```sh
+# Ortak, güçlü bir parola üret (bir kez), İKİ makinede de aynısını kullan:
+openssl rand -base64 24
+# Mac:      export KEYBOARD_IT_KEY='ürettiğin-değer'   (~/.zshrc'ye ekle)
+# Windows:  setx KEYBOARD_IT_KEY "ürettiğin-değer"     (yeni terminal aç)
+```
+
+## Çalıştır (asıl özellik)
 
 **Ön koşul (Mac):** Sistem Ayarları > Klavye > "🌐/fn tuşuna basınca → Hiçbir şey yapma".
 **İzin (Mac):** terminale hem Giriş İzleme hem Erişilebilirlik ver.
+**Anahtar:** iki tarafta da `KEYBOARD_IT_KEY` ayarlı (yukarı bkz).
 
 ```sh
-# Windows'ta win-receiver çalışsın + Notepad odakta (M1'den beri değişmedi).
+# Windows'ta: git pull + cargo run -p win-receiver, Notepad odakta.
 # Mac'te:
 cargo run -p mac-sender -- <windows-ip>
 # PASİF başlar. Fn'e çift bas → AKTİF (yazdığın Windows'a gider, Mac'te bastırılır).
