@@ -25,6 +25,45 @@ fn normalize_addr(arg: &str) -> String {
     }
 }
 
+// --- Son kullanılan adresi hatırla (~/.keyboard-it-ip) ---
+fn config_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".keyboard-it-ip"))
+}
+
+fn save_ip(addr: &str) {
+    if let Some(p) = config_path() {
+        let _ = std::fs::write(p, addr);
+    }
+}
+
+fn load_ip() -> Option<String> {
+    let s = std::fs::read_to_string(config_path()?).ok()?;
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Adresi çöz: argüman verildiyse onu kullan + hatırla; yoksa kayıtlıyı kullan.
+fn resolve_addr(explicit: Option<String>) -> String {
+    match explicit {
+        Some(a) => {
+            let addr = normalize_addr(&a);
+            save_ip(&addr); // sonraki sefer argümansız çalışsın diye
+            addr
+        }
+        None => match load_ip() {
+            Some(saved) => {
+                println!("kayıtlı adres kullanılıyor: {saved}  (değiştirmek için: -- <yeni-ip>)");
+                saved
+            }
+            None => normalize_addr("127.0.0.1"),
+        },
+    }
+}
+
 /// Test modu: bağlan ve sabit "hello" gönder (M1 davranışı). İzin gerektirmez.
 fn send_hello(addr: &str) -> io::Result<()> {
     use std::thread::sleep;
@@ -55,7 +94,7 @@ fn main() -> io::Result<()> {
         Some(a) => (false, Some(a.to_string())),
         None => (false, None),
     };
-    let addr = normalize_addr(&addr_arg.unwrap_or_else(|| "127.0.0.1".to_string()));
+    let addr = resolve_addr(addr_arg);
 
     if hello_mode {
         return send_hello(&addr);

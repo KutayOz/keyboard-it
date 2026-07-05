@@ -65,7 +65,7 @@ pub fn run(addr: String) -> io::Result<()> {
     println!("bağlandı.");
 
     // Noise (NNpsk0) el sıkışması — sender thread spawn'ından ÖNCE, ana thread stream'e sahipken.
-    let mut transport = protocol::secure::handshake_initiator(&mut stream, &psk)?;
+    let transport = protocol::secure::handshake_initiator(&mut stream, &psk)?;
     println!("şifreli kanal kuruldu (Noise NNpsk0).");
 
     println!("Durum: PASİF. Aç/kapa için Fn'e çift bas.");
@@ -75,11 +75,37 @@ pub fn run(addr: String) -> io::Result<()> {
     // Callback hafif kalsın: olayları kanala koy; ayrı thread TCP'ye framed yazar.
     let (tx, rx) = mpsc::channel::<KeyEvent>();
     thread::spawn(move || {
-        // stream VE transport bu thread'e taşınır (TransportState: Send — doğrulandı).
-        for ev in rx {
-            if protocol::secure::send_event(&mut transport, &mut stream, &ev).is_err() {
-                eprintln!("bağlantı koptu — gönderici thread duruyor.");
-                break;
+        // İlk bağlantı ana thread'den geldi; kopmalarda OTOMATİK yeniden bağlan.
+        // (TransportState: Send — bu thread'e taşınabiliyor.)
+        let mut current = Some((stream, transport));
+        'reconnect: loop {
+            let (mut s, mut t) = match current.take() {
+                Some(x) => x,
+                None => {
+                    // Yeniden bağlan: connect_retry ~4s dener; olmazsa döngü tekrar dener.
+                    match connect_retry(&addr) {
+                        Ok(mut s2) => match protocol::secure::handshake_initiator(&mut s2, &psk) {
+                            Ok(t2) => {
+                                println!("yeniden bağlandı (şifreli).");
+                                (s2, t2)
+                            }
+                            Err(_) => continue 'reconnect,
+                        },
+                        Err(_) => continue 'reconnect,
+                    }
+                }
+            };
+            // Gönderim döngüsü — bağlantı kopana kadar.
+            loop {
+                match rx.recv() {
+                    Ok(ev) => {
+                        if protocol::secure::send_event(&mut t, &mut s, &ev).is_err() {
+                            eprintln!("bağlantı koptu — yeniden bağlanılıyor...");
+                            continue 'reconnect; // current = None -> üstte reconnect
+                        }
+                    }
+                    Err(_) => return, // ana thread gitti (kanal kapandı)
+                }
             }
         }
     });

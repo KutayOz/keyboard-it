@@ -7,10 +7,11 @@
 //! Çapraz platform: dinleme + deşifre her OS'ta çalışır. Enjeksiyon Windows'a özeldir;
 //! Windows DIŞINDA "dry-run" (yazdır) modunda çalışır.
 
+use std::collections::HashSet;
 use std::io;
 use std::net::TcpListener;
 
-use protocol::DEFAULT_PORT;
+use protocol::{KeyEvent, MsgType, DEFAULT_PORT};
 
 mod inject;
 mod scancode;
@@ -50,16 +51,31 @@ fn main() -> io::Result<()> {
             }
         };
 
+        // Bu bağlantıda basılı tuşları izle; kopunca hepsini bırak (stuck-key önleme).
+        let mut held: HashSet<u16> = HashSet::new();
         loop {
             match protocol::secure::recv_event(&mut transport, &mut stream) {
-                Ok(ev) => inject::handle(ev),
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                    println!("bağlantı kapandı: {peer:?}");
-                    // TODO: burada basılı kalan tüm tuşları serbest bırak (all-keys-up).
-                    break;
+                Ok(ev) => {
+                    match ev.msg {
+                        MsgType::Down | MsgType::Repeat => {
+                            held.insert(ev.hid_usage);
+                        }
+                        MsgType::Up => {
+                            held.remove(&ev.hid_usage);
+                        }
+                    }
+                    inject::handle(ev);
                 }
                 Err(e) => {
-                    eprintln!("okuma/çözme hatası: {e}");
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        println!("bağlantı kapandı: {peer:?}");
+                    } else {
+                        eprintln!("okuma/çözme hatası: {e}");
+                    }
+                    // Kalan basılı tuşları bırak — yoksa Windows'ta (çoğunlukla bir modifier) takılır.
+                    for hid in held.drain() {
+                        inject::handle(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
+                    }
                     break;
                 }
             }
