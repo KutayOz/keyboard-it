@@ -19,11 +19,24 @@ Mac: dahili klavye -> CGEventTap (yakala + Fn toggle) -> HID usage'a çevir
 
 ## Kilometre taşları
 
-- **M0 ✅:** win-receiver Windows'ta SendInput ile tuş enjekte eder. (Windows'ta doğrulandı.)
-- **M1 ✅ (kod):** tuşlar Mac -> Windows, TCP üzerinden. Mac'te dry-run ile doğrulandı;
-  iki-makine testi için bkz. `M1-HANDOFF-TR.md`.
-- **M2:** gerçek CGEventTap yakalama (mac-sender), `src/capture.rs`'i devreye al.
-- **M3:** çift-tıklama-Fn toggle.
+- **M0 ✅:** win-receiver Windows'ta SendInput ile tuş enjekte eder. (Doğrulandı.)
+- **M1 ✅:** tuşlar Mac -> Windows, TCP üzerinden. (İki makinede doğrulandı.)
+- **M2 ✅:** gerçek CGEventTap yakalama — Mac'te yaz, Windows'ta çık. (Doğrulandı.)
+- **M3 (kod hazır):** çift-tıklama-Fn ile aç/kapa + aktifken Mac'te bastırma.
+  Canlı test: PASİF başlar, Fn'e çift bas → AKTİF (Windows'a gider), tekrar → PASİF.
+
+## M3'ü çalıştır (asıl özellik)
+
+**Ön koşul (Mac):** Sistem Ayarları > Klavye > "🌐/fn tuşuna basınca → Hiçbir şey yapma".
+**İzin (Mac):** terminale hem Giriş İzleme hem Erişilebilirlik ver.
+
+```sh
+# Windows'ta win-receiver çalışsın + Notepad odakta (M1'den beri değişmedi).
+# Mac'te:
+cargo run -p mac-sender -- <windows-ip>
+# PASİF başlar. Fn'e çift bas → AKTİF (yazdığın Windows'a gider, Mac'te bastırılır).
+# Tekrar çift bas → PASİF. Kilitlenirsen: fareyle  menü > Force Quit.
+```
 
 ## M1'i çalıştır (iki makine)
 
