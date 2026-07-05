@@ -4,6 +4,9 @@
 //! iki taraf da aynı `KeyEvent` tipini `use` eder. Böylece protokol anlaşmazlığı
 //! derleme zamanında imkansız hale gelir.
 
+/// LAN'de tuş vuruşlarını şifreleyen Noise (NNpsk0) katmanı.
+pub mod secure;
+
 /// Mesaj türü. Tek bir u8 etiketi olarak kodlanır.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]

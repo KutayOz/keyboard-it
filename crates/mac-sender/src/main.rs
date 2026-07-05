@@ -30,14 +30,18 @@ fn send_hello(addr: &str) -> io::Result<()> {
     use std::thread::sleep;
     use std::time::Duration;
 
+    let psk = protocol::secure::psk_from_env()?;
     println!("bağlanılıyor: {addr}  (hello testi)");
     let mut stream = net::connect_retry(addr)?;
-    println!("bağlandı. 'hello' gönderiliyor...");
+    let mut t = protocol::secure::handshake_initiator(&mut stream, &psk)?;
+    println!("bağlandı (şifreli). 'hello' gönderiliyor...");
     for c in "hello".chars() {
         let hid = 0x04 + (c as u16 - 'a' as u16); // a-z -> HID usage
-        KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }.write_framed(&mut stream)?;
+        protocol::secure::send_event(&mut t, &mut stream,
+            &KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 })?;
         sleep(Duration::from_millis(15));
-        KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }.write_framed(&mut stream)?;
+        protocol::secure::send_event(&mut t, &mut stream,
+            &KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 })?;
         sleep(Duration::from_millis(40));
     }
     println!("gönderildi.");

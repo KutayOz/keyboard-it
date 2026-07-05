@@ -3,5 +3,7 @@ name = "protocol"
 version = "0.1.0"
 edition = "2021"
 
-# OS'tan bağımsız, sıfır zorunlu bağımlılık: iki binary'nin paylaştığı "köprü".
+# İki binary'nin paylaştığı "köprü" + LAN şifreleme katmanı.
 [dependencies]
+snow = "0.10"   # Noise protokolü; default feature'lar 25519 + ChaChaPoly + BLAKE2s
+blake2 = "0.10" # parolayı 32 baytlık PSK'ye sıkıştırmak için (BLAKE2s-256)

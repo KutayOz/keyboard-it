@@ -1,21 +1,24 @@
-//! win-receiver: TCP'den `protocol::KeyEvent` alıp Windows'a `SendInput` ile basar.
+//! win-receiver: TCP'den şifreli `protocol::KeyEvent` alıp Windows'a `SendInput` ile basar.
 //!
-//! M1 (bu sürüm): bir TCP portu dinler, gelen framed tuş olaylarını çözer,
-//! HID usage -> Windows scancode çevirir ve enjekte eder.
+//! Bağlantı Noise (NNpsk0) ile şifrelidir: accept'ten sonra responder el sıkışması yapılır,
+//! sonra her tuş `recv_event` ile deşifre edilir. `KEYBOARD_IT_KEY` env var'ı ŞART; yoksa
+//! ve mac-sender'daki ile AYNI değilse bağlantı reddedilir.
 //!
-//! Çapraz platform: dinleme + çözme her OS'ta çalışır. Enjeksiyon Windows'a özeldir;
-//! Windows DIŞINDA (ör. senin Mac'inde) "dry-run" modunda çalışır — gelen tuşları
-//! enjekte etmeden yazdırır. Böylece tüm ağ/protokol yolu Windows olmadan test edilir.
+//! Çapraz platform: dinleme + deşifre her OS'ta çalışır. Enjeksiyon Windows'a özeldir;
+//! Windows DIŞINDA "dry-run" (yazdır) modunda çalışır.
 
 use std::io;
 use std::net::TcpListener;
 
-use protocol::{KeyEvent, DEFAULT_PORT};
+use protocol::DEFAULT_PORT;
 
 mod inject;
 mod scancode;
 
 fn main() -> io::Result<()> {
+    // Anahtarı EN BAŞTA türet; eksikse hiçbir şey açmadan (bind bile etmeden) dur.
+    let psk = protocol::secure::psk_from_env()?;
+
     let listener = TcpListener::bind(("0.0.0.0", DEFAULT_PORT))?;
     println!("win-receiver dinliyor: 0.0.0.0:{DEFAULT_PORT} — bağlantı bekleniyor");
     #[cfg(not(windows))]
@@ -34,12 +37,25 @@ fn main() -> io::Result<()> {
         let _ = stream.set_nodelay(true);
         println!("bağlandı: {peer:?}");
 
+        // Noise responder el sıkışması. Yanlış PSK / Noise-olmayan client temiz bir
+        // kimlik reddi olarak düşürülür; sunucu sıradaki bağlantıyı bekler.
+        let mut transport = match protocol::secure::handshake_responder(&mut stream, &psk) {
+            Ok(t) => {
+                println!("şifreli kanal kuruldu (Noise NNpsk0).");
+                t
+            }
+            Err(e) => {
+                eprintln!("el sıkışma başarısız (yanlış KEYBOARD_IT_KEY?): {e}");
+                continue;
+            }
+        };
+
         loop {
-            match KeyEvent::read_framed(&mut stream) {
+            match protocol::secure::recv_event(&mut transport, &mut stream) {
                 Ok(ev) => inject::handle(ev),
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     println!("bağlantı kapandı: {peer:?}");
-                    // TODO(M3+): burada basılı kalan tüm tuşları serbest bırak (all-keys-up).
+                    // TODO: burada basılı kalan tüm tuşları serbest bırak (all-keys-up).
                     break;
                 }
                 Err(e) => {

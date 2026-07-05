@@ -57,9 +57,17 @@ struct State {
 }
 
 pub fn run(addr: String) -> io::Result<()> {
+    // Anahtarı ağa dokunmadan ÖNCE türet (eksikse hemen dur).
+    let psk = protocol::secure::psk_from_env()?;
+
     println!("bağlanılıyor: {addr}");
     let mut stream = connect_retry(&addr)?;
     println!("bağlandı.");
+
+    // Noise (NNpsk0) el sıkışması — sender thread spawn'ından ÖNCE, ana thread stream'e sahipken.
+    let mut transport = protocol::secure::handshake_initiator(&mut stream, &psk)?;
+    println!("şifreli kanal kuruldu (Noise NNpsk0).");
+
     println!("Durum: PASİF. Aç/kapa için Fn'e çift bas.");
     println!("(İzin: Giriş İzleme + Erişilebilirlik. Ön koşul: fn tuşu 'Hiçbir şey yapma'.)");
     println!("(Çıkış: Ctrl-C — ya da kilitlenirsen fareyle  > Force Quit.)");
@@ -67,8 +75,9 @@ pub fn run(addr: String) -> io::Result<()> {
     // Callback hafif kalsın: olayları kanala koy; ayrı thread TCP'ye framed yazar.
     let (tx, rx) = mpsc::channel::<KeyEvent>();
     thread::spawn(move || {
+        // stream VE transport bu thread'e taşınır (TransportState: Send — doğrulandı).
         for ev in rx {
-            if ev.write_framed(&mut stream).is_err() {
+            if protocol::secure::send_event(&mut transport, &mut stream, &ev).is_err() {
                 eprintln!("bağlantı koptu — gönderici thread duruyor.");
                 break;
             }
