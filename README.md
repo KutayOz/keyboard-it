@@ -22,8 +22,11 @@ Mac: dahili klavye -> CGEventTap (yakala + Fn toggle) -> HID usage'a çevir
 - **M0 ✅:** win-receiver Windows'ta SendInput ile tuş enjekte eder. (Doğrulandı.)
 - **M1 ✅:** tuşlar Mac -> Windows, TCP üzerinden. (İki makinede doğrulandı.)
 - **M2 ✅:** gerçek CGEventTap yakalama — Mac'te yaz, Windows'ta çık. (Doğrulandı.)
-- **M3 (kod hazır):** çift-tıklama-Fn ile aç/kapa + aktifken Mac'te bastırma.
-  Canlı test: PASİF başlar, Fn'e çift bas → AKTİF (Windows'a gider), tekrar → PASİF.
+- **M3 ✅:** çift-tıklama-Fn ile aç/kapa + aktifken Mac'te bastırma.
+- **Cila ✅:** Cmd→Ctrl + Türkçe Q + F-tuşları; TLS-benzeri Noise şifreleme; otomatik
+  yeniden bağlanma; kopmada takılı tuş bırakma; IP'yi hatırlama.
+- **Fare ✅:** trackpad/fare hareketi + tıklama + scroll (AKTİF iken Windows'a; Mac imleci
+  donar = KVM). Tek kaçış AKTİF iken çift-Fn.
 
 ## Şifreleme (zorunlu)
 
