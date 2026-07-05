@@ -1,64 +1,70 @@
-//! mac-sender: (M2'de) MacBook klavyesini CGEventTap ile yakalayıp tuşları
-//! `protocol::KeyEvent` olarak TCP ile win-receiver'a gönderecek.
-//!
-//! M1 (bu sürüm): henüz yakalama YOK. Ağ yolunu kanıtlamak için, verilen adrese
-//! bağlanıp sabit-kodlanmış "hello" dizisini KeyEvent olarak gönderir.
+//! mac-sender: MacBook klavyesini yakalayıp tuşları TCP ile win-receiver'a gönderir.
 //!
 //! Kullanım:
-//!   cargo run -p mac-sender -- <windows-ip>[:port]
-//!   (port verilmezse protocol::DEFAULT_PORT kullanılır; adres verilmezse 127.0.0.1)
+//!   cargo run -p mac-sender -- <windows-ip>[:port]     # M2: gerçek klavye yakalama (macOS)
+//!   cargo run -p mac-sender -- --hello <windows-ip>    # test: sabit 'hello' gönder
 //!
-//! Gerçek CGEventTap yakalama iskeleti `src/capture.rs` içinde referans; M2'de
-//! `mod capture;` ile etkinleştirilecek.
+//! Port verilmezse protocol::DEFAULT_PORT kullanılır.
 
-use std::net::TcpStream;
-use std::thread::sleep;
-use std::time::Duration;
+mod net;
+
+#[cfg(target_os = "macos")]
+mod capture;
+#[cfg(target_os = "macos")]
+mod keymap;
+
+use std::io;
 
 use protocol::{KeyEvent, MsgType, DEFAULT_PORT};
 
-/// Bir ASCII harfini/space'i USB HID Usage koduna çevir (Usage Page 0x07).
-fn hid_for(c: char) -> Option<u16> {
-    Some(match c {
-        'a'..='z' => 0x04 + (c as u16 - 'a' as u16),
-        ' ' => 0x2C,
-        _ => return None,
-    })
-}
-
-fn main() -> std::io::Result<()> {
-    // Adresi argümandan al; sadece IP verilmişse portu ekle.
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1".to_string());
-    let addr = if arg.contains(':') {
-        arg
+fn normalize_addr(arg: &str) -> String {
+    if arg.contains(':') {
+        arg.to_string()
     } else {
         format!("{arg}:{DEFAULT_PORT}")
-    };
-
-    println!("bağlanılıyor: {addr}");
-    // win-receiver henüz ayakta değilse birkaç saniye tekrar dene.
-    let mut stream = None;
-    for _ in 0..40 {
-        match TcpStream::connect(&addr) {
-            Ok(s) => {
-                stream = Some(s);
-                break;
-            }
-            Err(_) => sleep(Duration::from_millis(100)),
-        }
     }
-    let mut stream = stream.expect("bağlanılamadı (win-receiver dinliyor mu?)");
-    stream.set_nodelay(true)?;
-    println!("bağlandı. 'hello' gönderiliyor...");
+}
 
+/// Test modu: bağlan ve sabit "hello" gönder (M1 davranışı). İzin gerektirmez.
+fn send_hello(addr: &str) -> io::Result<()> {
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    println!("bağlanılıyor: {addr}  (hello testi)");
+    let mut stream = net::connect_retry(addr)?;
+    println!("bağlandı. 'hello' gönderiliyor...");
     for c in "hello".chars() {
-        let hid = hid_for(c).expect("bu karakter için HID eşlemesi yok");
+        let hid = 0x04 + (c as u16 - 'a' as u16); // a-z -> HID usage
         KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }.write_framed(&mut stream)?;
         sleep(Duration::from_millis(15));
         KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }.write_framed(&mut stream)?;
         sleep(Duration::from_millis(40));
     }
-
-    println!("gönderildi. (win-receiver tarafında 'hello' görünmeli / dry-run'da yazdırılmalı)");
+    println!("gönderildi.");
     Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let (hello_mode, addr_arg) = match args.get(1).map(String::as_str) {
+        Some("--hello") => (true, args.get(2).cloned()),
+        Some(a) => (false, Some(a.to_string())),
+        None => (false, None),
+    };
+    let addr = normalize_addr(&addr_arg.unwrap_or_else(|| "127.0.0.1".to_string()));
+
+    if hello_mode {
+        return send_hello(&addr);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        capture::run(addr)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = addr;
+        eprintln!("Gerçek klavye yakalama yalnızca macOS'ta. Test için: mac-sender -- --hello <ip>");
+        Ok(())
+    }
 }
