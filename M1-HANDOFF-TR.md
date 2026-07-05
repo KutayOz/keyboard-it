@@ -15,10 +15,15 @@
   tuş olayları olarak gönderir. (Mac'i kullanıcı çalıştıracak — senin işin değil.)
 - **Toolchain zaten kurulu** (M0'da yaptın). Yeni kurulum yok.
 
-> **ÖNEMLİ — kodu tazele:** Kaynak kod M0'dan beri değişti. Elindeki `keyboard-it`
-> klasörünün **güncel kopya** olduğundan emin ol (kullanıcı Mac'ten yeniden kopyalar).
-> Emin değilsen kullanıcıdan güncel klasörü iste. `crates/win-receiver/src/` altında
-> `inject.rs` ve `scancode.rs` dosyaları VARSA kod günceldir.
+> **ÖNEMLİ — kodu tazele (git ile):** Proje artık GitHub'da. Klasörü elle kopyalama —
+> `git pull` ile güncelle:
+> ```powershell
+> cd C:\yol\keyboard-it
+> git pull
+> ```
+> İlk kez alıyorsan repoyu clone et (özel repo, bir kereye mahsus GitHub girişi gerekir) —
+> bkz. **`WINDOWS-KURULUM-GIT-TR.md`**. Kod güncelse `crates/win-receiver/src/` altında
+> `inject.rs` ve `scancode.rs` dosyaları vardır.
 
 ---
 
