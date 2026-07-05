@@ -89,6 +89,23 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0xE6 => (0x38, true),  // RightAlt (AltGr)
         0xE7 => (0x5C, true),  // RightGUI (Win)
 
+        // --- ISO tuşu (Türkçe/ISO: <>| ) ---
+        0x64 => (0x56, false), // HID Non-US backslash -> Set-1 make 0x56 (Europe 2)
+
+        // --- Fonksiyon tuşları F1-F12 ---
+        0x3A => (0x3B, false), // F1
+        0x3B => (0x3C, false), // F2
+        0x3C => (0x3D, false), // F3
+        0x3D => (0x3E, false), // F4
+        0x3E => (0x3F, false), // F5
+        0x3F => (0x40, false), // F6
+        0x40 => (0x41, false), // F7
+        0x41 => (0x42, false), // F8
+        0x42 => (0x43, false), // F9
+        0x43 => (0x44, false), // F10
+        0x44 => (0x57, false), // F11 (dizi kırılır: 0x45 DEĞİL)
+        0x45 => (0x58, false), // F12 (dizi kırılır: 0x46 DEĞİL)
+
         _ => return None,
     };
     Some(v)

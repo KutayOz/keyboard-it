@@ -77,15 +77,32 @@ pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
         0x7D => 0x51, // ArrowDown
         0x7E => 0x52, // ArrowUp
 
-        // Modifierlar
-        0x3B => 0xE0, // LeftControl
+        // ISO ek tuşu (Türkçe/ISO MacBook: Sol Shift ile Z arasındaki <>| tuşu)
+        0x0A => 0x64, // kVK_ISO_Section -> HID Non-US backslash and pipe
+
+        // Fonksiyon tuşları F1-F12 (macOS keycode'ları ardışık DEĞİL)
+        0x7A => 0x3A, // F1
+        0x78 => 0x3B, // F2
+        0x63 => 0x3C, // F3
+        0x76 => 0x3D, // F4
+        0x60 => 0x3E, // F5
+        0x61 => 0x3F, // F6
+        0x62 => 0x40, // F7
+        0x64 => 0x41, // F8  (mac keycode 0x64 = F8; ISO tuşu keycode 0x0A'dır, 0x64 değil)
+        0x65 => 0x42, // F9
+        0x6D => 0x43, // F10
+        0x67 => 0x44, // F11
+        0x6F => 0x45, // F12
+
+        // Modifierlar — Cmd<->Ctrl TAKAS (kullanıcı tercihi: Cmd+C => Windows'ta Ctrl+C)
+        0x37 => 0xE0, // LeftCommand  -> Windows LeftControl  (eskiden 0xE3)
+        0x3B => 0xE3, // LeftControl  -> Windows LeftGUI/Win  (eskiden 0xE0)
         0x38 => 0xE1, // LeftShift
         0x3A => 0xE2, // LeftOption (Alt)
-        0x37 => 0xE3, // LeftCommand (GUI)
-        0x3E => 0xE4, // RightControl
+        0x36 => 0xE4, // RightCommand -> Windows RightControl (eskiden 0xE7)
+        0x3E => 0xE7, // RightControl -> Windows RightGUI/Win (eskiden 0xE4)
         0x3C => 0xE5, // RightShift
-        0x3D => 0xE6, // RightOption
-        0x36 => 0xE7, // RightCommand
+        0x3D => 0xE6, // RightOption (AltGr)
 
         _ => return None,
     };
