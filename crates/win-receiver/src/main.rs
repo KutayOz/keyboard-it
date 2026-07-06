@@ -1,106 +1,29 @@
-//! win-receiver: TCP'den şifreli `protocol::KeyEvent` alıp Windows'a `SendInput` ile basar.
+//! win-receiver: Mac'ten şifreli tuş/fare olayları alıp Windows'a SendInput ile basar.
 //!
-//! Bağlantı Noise (NNpsk0) ile şifrelidir: accept'ten sonra responder el sıkışması yapılır,
-//! sonra her tuş `recv_event` ile deşifre edilir. `KEYBOARD_IT_KEY` env var'ı ŞART; yoksa
-//! ve mac-sender'daki ile AYNI değilse bağlantı reddedilir.
+//! Windows'ta bir sistem TEPSİSİ (tray) ikonuyla çalışır (durum + Ayarlar/Cikis menüsü);
+//! ağ döngüsü (serve) arka thread'de. Windows DIŞINDA (ör. macOS testi) tepsi yoktur,
+//! serve doğrudan "dry-run" modunda çalışır.
 //!
-//! Çapraz platform: dinleme + deşifre her OS'ta çalışır. Enjeksiyon Windows'a özeldir;
-//! Windows DIŞINDA "dry-run" (yazdır) modunda çalışır.
+//! Ayarlar artık config dosyasında (protocol::config); sır config'te yoksa
+//! KEYBOARD_IT_KEY env var'ına düşülür.
 
-use std::collections::HashSet;
 use std::io;
-use std::net::TcpListener;
-
-use protocol::{InputEvent, KeyEvent, MsgType};
 
 mod inject;
 mod scancode;
+mod serve;
+#[cfg(windows)]
+mod tray;
 
 fn main() -> io::Result<()> {
-    // Config yükle (yoksa default: env var yedeğiyle çalışır). Anahtarı EN BAŞTA türet.
     let cfg = protocol::config::Config::load()?.unwrap_or_default();
-    let psk = protocol::secure::psk_from_config_or_env(&cfg)?;
-    let port = cfg.port;
 
-    let listener = TcpListener::bind(("0.0.0.0", port))?;
-    println!("win-receiver dinliyor: 0.0.0.0:{port} — bağlantı bekleniyor");
-    #[cfg(not(windows))]
-    println!("(bu platformda enjeksiyon YOK — gelen tuşlar sadece yazdırılır [dry-run])");
-
-    // Basit v1: aynı anda tek bağlantı. Bağlantı düşerse yeni bağlantı bekle.
-    for stream in listener.incoming() {
-        let mut stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("bağlantı kabul hatası: {e}");
-                continue;
-            }
-        };
-        let peer = stream.peer_addr().ok();
-        let _ = stream.set_nodelay(true);
-        println!("bağlandı: {peer:?}");
-
-        // Noise responder el sıkışması. Yanlış PSK / Noise-olmayan client temiz bir
-        // kimlik reddi olarak düşürülür; sunucu sıradaki bağlantıyı bekler.
-        let mut transport = match protocol::secure::handshake_responder(&mut stream, &psk) {
-            Ok(t) => {
-                println!("şifreli kanal kuruldu (Noise NNpsk0).");
-                t
-            }
-            Err(e) => {
-                eprintln!("el sıkışma başarısız (yanlış KEYBOARD_IT_KEY?): {e}");
-                continue;
-            }
-        };
-
-        // Bu bağlantıda basılı tuşları VE fare butonlarını izle; kopunca hepsini bırak.
-        let mut held: HashSet<u16> = HashSet::new();
-        let mut held_btns: HashSet<u8> = HashSet::new();
-        loop {
-            match protocol::secure::recv_event(&mut transport, &mut stream) {
-                Ok(ev) => match ev {
-                    InputEvent::Key(ke) => {
-                        match ke.msg {
-                            MsgType::Down | MsgType::Repeat => {
-                                held.insert(ke.hid_usage);
-                            }
-                            MsgType::Up => {
-                                held.remove(&ke.hid_usage);
-                            }
-                        }
-                        inject::handle(ke);
-                    }
-                    InputEvent::MouseButton { button, down } => {
-                        if down {
-                            held_btns.insert(button);
-                        } else {
-                            held_btns.remove(&button);
-                        }
-                        inject::handle_mouse(ev);
-                    }
-                    // Hareket ve scroll relatiftir: izleme gerekmez.
-                    InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } => {
-                        inject::handle_mouse(ev);
-                    }
-                },
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        println!("bağlantı kapandı: {peer:?}");
-                    } else {
-                        eprintln!("okuma/çözme hatası: {e}");
-                    }
-                    // Kalan basılı tuşları bırak — yoksa Windows'ta (çoğunlukla bir modifier) takılır.
-                    for hid in held.drain() {
-                        inject::handle(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
-                    }
-                    // Kalan basılı fare butonlarını da bırak.
-                    for button in held_btns.drain() {
-                        inject::handle_mouse(InputEvent::MouseButton { button, down: false });
-                    }
-                    break;
-                }
-            }
-        }
+    #[cfg(windows)]
+    {
+        tray::run(cfg)
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        serve::serve(&cfg, |_| {})
+    }
 }
