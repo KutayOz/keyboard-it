@@ -28,9 +28,16 @@ use core_graphics::event::{
     CGEventTapPlacement, CGEventType, CallbackResult, EventField,
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use objc2_app_kit::NSApplication;
+use objc2_foundation::MainThreadMarker;
+
 use protocol::{mousebtn, InputEvent, KeyEvent, MsgType};
 
 use crate::keymap::mac_keycode_to_hid;
+use crate::menubar;
 use crate::net::connect_retry;
 
 const FN_KEYCODE: i64 = 0x3F; // kVK_Function (Fn / 🌐 Globe)
@@ -126,6 +133,16 @@ pub fn run(addr: String) -> io::Result<()> {
         }
     });
 
+    // Menü çubuğu (Accessory: Dock ikonu yok) — ana thread'de kur.
+    let mtm = MainThreadMarker::new()
+        .expect("run() ana thread'de çağrılmalı (AppKit ana thread ister)");
+    let menu_bar = menubar::setup(mtm, false);
+    // Durum bayrağı: tap callback (Send olmalı) buraya yazar; ana-thread timer okuyup
+    // menü çubuğu başlığını günceller (objc2 nesneleri !Send, callback'e taşınamaz).
+    let active_flag = Arc::new(AtomicBool::new(false));
+    menubar::install_status_updater(mtm, menu_bar.status_item.clone(), active_flag.clone());
+    let flag_cb = active_flag.clone();
+
     let state = RefCell::new(State {
         active: false,
         fn_down: false,
@@ -195,6 +212,8 @@ pub fn run(addr: String) -> io::Result<()> {
                             }
                             println!("<<< PASİF — klavye+fare tekrar Mac'te.");
                         }
+                        // Durum bayrağını güncelle; menü çubuğunu ana-thread timer yansıtır.
+                        flag_cb.store(st.active, Ordering::Relaxed);
                     } else {
                         st.last_fn_press = Some(Instant::now());
                     }
@@ -308,7 +327,14 @@ pub fn run(addr: String) -> io::Result<()> {
         CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
     }
     tap.enable();
-    println!("hazır. Fn'e çift bas → AKTİF; tekrar çift bas → PASİF.");
-    CFRunLoop::run_current();
+    println!("hazır. Fn'e çift bas → AKTİF; tekrar çift bas → PASİF. (Menü çubuğu: Cikis ile çık)");
+
+    // Tap source'u ana run-loop'a EKLEDİKTEN sonra AppKit'i çalıştır. app.run()
+    // aynı ana-thread CFRunLoop'unu sürer; source kCFRunLoopCommonModes'ta olduğundan
+    // tap NSApp altında da tetiklenir.
+    let app = NSApplication::sharedApplication(mtm);
+    app.run();
+
+    drop(menu_bar); // tutamaç canlılığı için buraya kadar taşı
     Ok(())
 }
