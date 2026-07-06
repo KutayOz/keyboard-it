@@ -29,6 +29,15 @@ pub fn psk_from_secret(secret: &str) -> [u8; 32] {
     psk
 }
 
+/// PSK'yi config'ten türet; boşsa KEYBOARD_IT_KEY env var'ına düş (geriye-uyum/dev).
+/// Kaynak-of-truth artık config dosyası; env var yalnız yedek.
+pub fn psk_from_config_or_env(cfg: &crate::config::Config) -> io::Result<[u8; 32]> {
+    if !cfg.shared_secret.is_empty() {
+        return Ok(psk_from_secret(&cfg.shared_secret));
+    }
+    psk_from_env()
+}
+
 /// KEYBOARD_IT_KEY'i oku ve PSK türet. Eksik/boşsa net hata (iki binary'de de aynı).
 pub fn psk_from_env() -> io::Result<[u8; 32]> {
     match std::env::var("KEYBOARD_IT_KEY") {

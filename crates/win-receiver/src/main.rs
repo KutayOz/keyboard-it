@@ -11,17 +11,19 @@ use std::collections::HashSet;
 use std::io;
 use std::net::TcpListener;
 
-use protocol::{InputEvent, KeyEvent, MsgType, DEFAULT_PORT};
+use protocol::{InputEvent, KeyEvent, MsgType};
 
 mod inject;
 mod scancode;
 
 fn main() -> io::Result<()> {
-    // Anahtarı EN BAŞTA türet; eksikse hiçbir şey açmadan (bind bile etmeden) dur.
-    let psk = protocol::secure::psk_from_env()?;
+    // Config yükle (yoksa default: env var yedeğiyle çalışır). Anahtarı EN BAŞTA türet.
+    let cfg = protocol::config::Config::load()?.unwrap_or_default();
+    let psk = protocol::secure::psk_from_config_or_env(&cfg)?;
+    let port = cfg.port;
 
-    let listener = TcpListener::bind(("0.0.0.0", DEFAULT_PORT))?;
-    println!("win-receiver dinliyor: 0.0.0.0:{DEFAULT_PORT} — bağlantı bekleniyor");
+    let listener = TcpListener::bind(("0.0.0.0", port))?;
+    println!("win-receiver dinliyor: 0.0.0.0:{port} — bağlantı bekleniyor");
     #[cfg(not(windows))]
     println!("(bu platformda enjeksiyon YOK — gelen tuşlar sadece yazdırılır [dry-run])");
 

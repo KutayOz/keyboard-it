@@ -7,3 +7,6 @@ edition = "2021"
 [dependencies]
 snow = "0.10"   # Noise protokolü; default feature'lar 25519 + ChaChaPoly + BLAKE2s
 blake2 = "0.10" # parolayı 32 baytlık PSK'ye sıkıştırmak için (BLAKE2s-256)
+directories = "6" # OS-standart config dizini
+serde = { version = "1", features = ["derive"] }
+toml = "1"

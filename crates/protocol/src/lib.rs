@@ -7,6 +7,9 @@
 /// LAN'de tuş vuruşlarını şifreleyen Noise (NNpsk0) katmanı.
 pub mod secure;
 
+/// Kalıcı config: paylaşılan sır + peer host (env var + ~/.keyboard-it-ip yerine).
+pub mod config;
+
 /// Mesaj türü. Tek bir u8 etiketi olarak kodlanır.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]

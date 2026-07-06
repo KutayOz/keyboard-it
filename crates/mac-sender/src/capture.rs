@@ -79,9 +79,10 @@ fn set_mouse_captured(captured: bool) {
     }
 }
 
-pub fn run(addr: String) -> io::Result<()> {
-    // Anahtarı ağa dokunmadan ÖNCE türet (eksikse hemen dur).
-    let psk = protocol::secure::psk_from_env()?;
+pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
+    // Anahtarı ağa dokunmadan ÖNCE türet (config, yoksa env yedeği).
+    let psk = protocol::secure::psk_from_config_or_env(&cfg)?;
+    let addr = cfg.peer_addr();
 
     println!("bağlanılıyor: {addr}");
     let mut stream = connect_retry(&addr)?;
