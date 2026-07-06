@@ -91,6 +91,28 @@ impl Config {
         }
     }
 
+    /// config.toml'u OS varsayılan metin editöründe aç. Yoksa düzenlenecek bir
+    /// default dosya oluşturur. (Menü/tray "Ayarlar" öğesi bunu çağırır.)
+    pub fn edit() -> io::Result<()> {
+        let path = Self::path()?;
+        if !path.exists() {
+            Config::default().save()?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open").arg("-t").arg(&path).spawn()?;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("notepad").arg(&path).spawn()?;
+        }
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        {
+            std::process::Command::new("xdg-open").arg(&path).spawn()?;
+        }
+        Ok(())
+    }
+
     /// Atomik yaz (tmp yaz, rename). Config dizinini oluşturur.
     pub fn save(&self) -> io::Result<()> {
         let path = Self::path()?;

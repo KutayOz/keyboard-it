@@ -64,12 +64,18 @@ define_class!(
         }
     }
 
-    // Menü "Cikis" öğesinin hedefi bu action; NSApp.terminate(None) çağırır.
     impl QuitDelegate {
+        // Menü "Cikis" -> NSApp.terminate (applicationWillTerminate temizliği tetiklenir).
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
             let mtm = self.mtm();
             NSApplication::sharedApplication(mtm).terminate(None);
+        }
+
+        // Menü "Ayarlar..." -> config.toml'u editörde aç.
+        #[unsafe(method(settings:))]
+        fn settings(&self, _sender: Option<&AnyObject>) {
+            let _ = protocol::config::Config::edit();
         }
     }
 );
@@ -103,6 +109,16 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool) -> MenuBar {
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     let menu = NSMenu::new(mtm);
+    let settings = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            ns_string!("Ayarlar..."),
+            Some(sel!(settings:)),
+            ns_string!(","),
+        )
+    };
+    unsafe { settings.setTarget(Some(&delegate)) };
+    menu.addItem(&settings);
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
