@@ -56,6 +56,22 @@ struct State {
     held: HashSet<u16>, // AKTİF iken Windows'a Down gönderilmiş HID usage'lar
 }
 
+/// Mac imlecini fiziksel fareden AYIR/BAĞLA. `captured=true` iken imleç DONAR
+/// (WindowServer artık fiziksel fareyle imleci hareket ettirmez) ama CGEventTap
+/// hâlâ delta'ları görür — event Drop'lamak imleci durdurmadığından bu gerekli.
+/// Kenar-clamp de kalkar, yani ekran kenarında bile delta akar. PASİF'te geri bağlanır.
+#[cfg(target_os = "macos")]
+fn set_mouse_captured(captured: bool) {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        // boolean_t (= int): connected=1 normal (bağlı), 0 = ayrık (imleç donar).
+        fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
+    }
+    unsafe {
+        let _ = CGAssociateMouseAndMouseCursorPosition(if captured { 0 } else { 1 });
+    }
+}
+
 pub fn run(addr: String) -> io::Result<()> {
     // Anahtarı ağa dokunmadan ÖNCE türet (eksikse hemen dur).
     let psk = protocol::secure::psk_from_env()?;
@@ -164,8 +180,10 @@ pub fn run(addr: String) -> io::Result<()> {
                         st.last_fn_press = None;
                         st.active = !st.active;
                         if st.active {
-                            println!(">>> AKTİF — klavye Windows'a gidiyor (Mac'te bastırılıyor).");
+                            set_mouse_captured(true); // Mac imlecini dondur
+                            println!(">>> AKTİF — klavye+fare Windows'a gidiyor (Mac'te bastırılıyor).");
                         } else {
+                            set_mouse_captured(false); // Mac imlecini geri bağla
                             // PASİF'e dönüş: Windows'ta basılı kalan tuşları serbest bırak.
                             let held: Vec<u16> = st.held.drain().collect();
                             for hid in held {
@@ -175,7 +193,7 @@ pub fn run(addr: String) -> io::Result<()> {
                                     modifiers: 0,
                                 }));
                             }
-                            println!("<<< PASİF — klavye tekrar Mac'te.");
+                            println!("<<< PASİF — klavye+fare tekrar Mac'te.");
                         }
                     } else {
                         st.last_fn_press = Some(Instant::now());
