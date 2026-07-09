@@ -5,3 +5,12 @@ members = [
     "crates/mac-sender",
     "crates/win-receiver",
 ]
+
+# Dağıtım için küçük, tek dosyalık release exe (.msi içine girer).
+# Not: opt-level/lto tüm workspace'i (mac-sender dahil) etkiler. panic="abort"
+# cross-platform riski (unwind farkı) yüzünden bilerek EKLENMEDİ.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -91,8 +91,9 @@ impl Config {
         }
     }
 
-    /// config.toml'u OS varsayılan metin editöründe aç. Yoksa düzenlenecek bir
-    /// default dosya oluşturur. (Menü/tray "Ayarlar" öğesi bunu çağırır.)
+    /// config.toml'u OS varsayılan metin editöründe aç (macOS/Linux); yoksa
+    /// düzenlenecek bir default dosya oluşturur. NOT: Windows `win-receiver` bunu
+    /// ARTIK kullanmıyor (Slint ayar penceresi var); mac-sender menü çubuğu çağırıyor.
     pub fn edit() -> io::Result<()> {
         let path = Self::path()?;
         if !path.exists() {
@@ -104,7 +105,10 @@ impl Config {
         }
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("notepad").arg(&path).spawn()?;
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("explorer")
+                .raw_arg(format!("/select,\"{}\"", path.display()))
+                .spawn()?;
         }
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         {

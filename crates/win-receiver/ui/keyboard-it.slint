@@ -1,0 +1,93 @@
+import { LineEdit, Button, CheckBox, VerticalBox, HorizontalBox, GroupBox, AboutSlint } from "std-widgets.slint";
+
+// Küçük ayar penceresi — tepsiden "Ayarlar..." ile açılır, kapanınca uygulama yaşar.
+export component SettingsWindow inherits Window {
+    title: "keyboard-it";
+    preferred-width: 380px;
+    preferred-height: 360px;
+
+    in property <bool> active;                 // dinleyici durumu (AKTİF/PASİF)
+    in-out property <string> pairing-key;
+    in-out property <string> peer-ip;
+    in-out property <string> peer-port;
+    in-out property <bool> autostart;
+    in property <string> status-line;          // Rust'tan bilgi/hata mesajı
+
+    callback start-listener();
+    callback stop-listener();
+    callback save();
+    callback autostart-changed(bool);
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+
+        Text {
+            text: root.active ? "● AKTİF — 5599 dinleniyor" : "○ PASİF — durduruldu";
+            color: root.active ? #2e7d32 : #b71c1c;
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        GroupBox {
+            title: "Ayarlar";
+            VerticalBox {
+                spacing: 6px;
+                Text { text: "Eşleşme anahtarı (iki tarafta AYNI olmalı)"; }
+                LineEdit { placeholder-text: "KEYBOARD_IT_KEY"; text <=> root.pairing-key; }
+                Text { text: "Peer IP (gönderen Mac)"; }
+                LineEdit { placeholder-text: "192.168.1.x"; text <=> root.peer-ip; }
+                Text { text: "Port"; }
+                LineEdit { placeholder-text: "5599"; text <=> root.peer-port; }
+                CheckBox {
+                    text: "Oturum açılışında otomatik başlat (yükseltilmiş)";
+                    checked <=> root.autostart;
+                    toggled => { root.autostart-changed(self.checked); }
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+            Button {
+                text: root.active ? "Durdur" : "Başlat";
+                clicked => {
+                    if (root.active) { root.stop-listener(); } else { root.start-listener(); }
+                }
+            }
+            Button { text: "Kaydet"; clicked => { root.save(); } }
+        }
+
+        Text { text: root.status-line; color: #808080; font-size: 12px; }
+
+        Rectangle { vertical-stretch: 1; }
+        AboutSlint { }
+    }
+}
+
+// Sistem tepsisi ikonu (Slint 1.17 native SystemTrayIcon → Shell_NotifyIconW).
+export component Tray inherits SystemTrayIcon {
+    icon: @image-url("tray.png");
+    in property <bool> active;
+    tooltip: root.active ? "keyboard-it — AKTİF" : "keyboard-it — PASİF";
+
+    callback show-settings();
+    callback toggle-listener();
+    callback quit();
+
+    Menu {
+        MenuItem {
+            title: root.active ? "Durdur" : "Başlat";
+            activated => { root.toggle-listener(); }
+        }
+        MenuItem {
+            title: "Ayarlar...";
+            activated => { root.show-settings(); }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "Çıkış";
+            activated => { root.quit(); }
+        }
+    }
+}
