@@ -77,6 +77,22 @@ define_class!(
         fn settings(&self, _sender: Option<&AnyObject>) {
             let _ = protocol::config::Config::edit();
         }
+
+        // Menü "Girişte Başlat" -> LaunchAgent'ı aç/kapat + tik işaretini güncelle.
+        // sender = tıklanan NSMenuItem; setState ile tiki yansıtırız.
+        #[unsafe(method(toggleStartup:))]
+        fn toggle_startup(&self, sender: Option<&AnyObject>) {
+            let now = crate::autostart::is_enabled();
+            let _ = crate::autostart::set_enabled(!now);
+            let enabled = crate::autostart::is_enabled();
+            if let Some(item) = sender {
+                // NSControlStateValue: On=1, Off=0.
+                let state: isize = if enabled { 1 } else { 0 };
+                unsafe {
+                    let _: () = msg_send![item, setState: state];
+                }
+            }
+        }
     }
 );
 
@@ -119,6 +135,23 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool) -> MenuBar {
     };
     unsafe { settings.setTarget(Some(&delegate)) };
     menu.addItem(&settings);
+
+    let startup = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            ns_string!("Girişte Başlat"),
+            Some(sel!(toggleStartup:)),
+            ns_string!(""),
+        )
+    };
+    unsafe { startup.setTarget(Some(&delegate)) };
+    unsafe {
+        // Açılışta gerçek durumu (LaunchAgent var mı) tik olarak yansıt.
+        let state: isize = if crate::autostart::is_enabled() { 1 } else { 0 };
+        let _: () = msg_send![&*startup, setState: state];
+    }
+    menu.addItem(&startup);
+
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),

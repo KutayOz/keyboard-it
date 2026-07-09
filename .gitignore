@@ -2,6 +2,12 @@
 /target
 **/target
 
+# Dağıtım çıktıları (paketleme scriptleri üretir; commit edilmez)
+/dist
+
+# İkon ara-çıktısı (make_icon.py üretir; .icns/.png kaynağı commit edilir)
+*.iconset/
+
 # macOS
 .DS_Store
 

@@ -12,6 +12,8 @@
 mod net;
 
 #[cfg(target_os = "macos")]
+mod autostart;
+#[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
 mod keymap;
@@ -79,6 +81,16 @@ fn main() -> io::Result<()> {
 
     #[cfg(target_os = "macos")]
     {
+        // Tek örnek: LaunchAgent (oturum açılışı) + elle açılış çakışmasın diye
+        // sabit bir loopback portunu kilit olarak tut. Zaten bağlıysa 2. örnek çıkar.
+        // (_guard, capture::run hiç dönmediği için süreç ömrü boyunca canlı kalır.)
+        let _guard = match std::net::TcpListener::bind(("127.0.0.1", 5598)) {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("keyboard-it zaten çalışıyor (menü çubuğuna bak).");
+                return Ok(());
+            }
+        };
         capture::run(cfg)
     }
     #[cfg(not(target_os = "macos"))]
