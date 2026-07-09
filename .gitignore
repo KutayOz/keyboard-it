@@ -5,6 +5,10 @@
 # Dağıtım çıktıları (paketleme scriptleri üretir; commit edilmez)
 /dist
 
+# Landing sayfasındaki installer'lar (CI/dist'ten kopyalanır; git'e girmez)
+site/downloads/*.dmg
+site/downloads/*.msi
+
 # İkon ara-çıktısı (make_icon.py üretir; .icns/.png kaynağı commit edilir)
 *.iconset/
 

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>keyboard-it &#8212; Download</title>
+<meta name="description" content="keyboard-it — an encrypted software KVM: type on your MacBook keyboard and control your Windows PC over your LAN. Double-tap Fn to switch.">
+<link rel="icon" type="image/png" href="keyboard-it.png">
+<style>
+  html, body { margin: 0; padding: 0; }
+  * { box-sizing: border-box; }
+  a { color: #0A246A; }
+  a:hover { color: #245EDC; }
+  ::selection { background: #245EDC; color: #fff; }
+  /* XP-style button interactions — were style-hover/style-active in Claude Design;
+     !important overrides the buttons' inline box-shadow/border on hover/active. */
+  .dl-btn:hover { border-color: #245EDC !important; box-shadow: 0 0 0 2px rgba(36,94,220,.35), 0 2px 6px rgba(10,36,106,.25) !important; }
+  .dl-btn:active { transform: translateY(1px); box-shadow: 0 1px 2px rgba(10,36,106,.3) inset !important; }
+  .gh-btn:hover { border-color: #245EDC !important; color: #245EDC !important; }
+</style>
+</head>
+<body>
+<div style="font-family: Tahoma, Verdana, Geneva, sans-serif; background: #4b7bb5; background-image: linear-gradient(180deg,#4f80ba 0%,#33608e 100%); background-attachment: fixed; min-height: 100vh; color: #202020; padding: 28px 16px 48px; -webkit-font-smoothing: antialiased;">
+
+  <!-- ============ APPLICATION WINDOW ============ -->
+  <div style="max-width: 920px; margin: 0 auto; border: 1px solid #0a246a; border-radius: 8px 8px 4px 4px; box-shadow: 0 10px 34px rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.4) inset; overflow: hidden; background: #ECE9D8;">
+
+    <!-- Title bar -->
+    <div style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 5px 0 6px; background: linear-gradient(180deg,#3f8bf5 0%,#1e6bec 8%,#1257de 42%,#0d4dd6 90%,#2f6fe8 100%); border-bottom: 1px solid #0a246a;">
+      <img src="keyboard-it.png" alt="keyboard-it icon" style="width: 18px; height: 18px; border-radius: 3px; display: block;">
+      <span style="color: #fff; font-size: 12px; font-weight: bold; text-shadow: 1px 1px 1px rgba(0,0,0,.55); flex: 1; letter-spacing: .2px;">keyboard-it &#8212; Download</span>
+      <div style="display: flex; gap: 3px;">
+        <div title="Minimize" style="width: 21px; height: 21px; border-radius: 3px; border: 1px solid rgba(255,255,255,.65); background: linear-gradient(180deg,#5b9bf6,#1a63e8); display: flex; align-items: flex-end; justify-content: center; box-shadow: 0 1px 0 rgba(0,0,0,.2);"><span style="display: block; width: 9px; height: 3px; background: #fff; margin-bottom: 4px;"></span></div>
+        <div title="Maximize" style="width: 21px; height: 21px; border-radius: 3px; border: 1px solid rgba(255,255,255,.65); background: linear-gradient(180deg,#5b9bf6,#1a63e8); display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 0 rgba(0,0,0,.2);"><span style="display: block; width: 10px; height: 9px; border: 2px solid #fff; border-top-width: 3px;"></span></div>
+        <div title="Close" style="width: 21px; height: 21px; border-radius: 3px; border: 1px solid rgba(255,255,255,.7); background: linear-gradient(180deg,#f08d6f,#d8482a); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: bold; line-height: 1; text-shadow: 0 1px 1px rgba(0,0,0,.3); box-shadow: 0 1px 0 rgba(0,0,0,.2);">&#10005;</div>
+      </div>
+    </div>
+
+    <!-- Window body -->
+    <div style="padding: 0;">
+
+      <!-- ===== HERO ===== -->
+      <section style="text-align: center; padding: 46px 24px 40px; background: linear-gradient(180deg,#ffffff 0%,#f3f1e6 100%); border-bottom: 1px solid #c9c4ad;">
+        <img class="reveal" src="keyboard-it.png" alt="keyboard-it" style="width: 96px; height: 96px; border-radius: 18px; box-shadow: 0 6px 16px rgba(20,60,160,.35); display: block; margin: 0 auto 22px;">
+        <h1 class="reveal" style="margin: 0 0 6px; font-size: 34px; line-height: 1.1; color: #0A246A; font-weight: bold; letter-spacing: -.3px;">keyboard&#8209;it</h1>
+        <p class="reveal" style="margin: 0 auto 14px; font-size: 20px; color: #245EDC; font-weight: bold; max-width: 560px;">Your MacBook keyboard, on your Windows PC.</p>
+        <p class="reveal" style="margin: 0 auto; font-size: 14px; line-height: 1.6; color: #4a4a44; max-width: 500px;">Encrypted software KVM over your LAN. Double&#8209;tap <span style="font-family: 'Lucida Console',Consolas,monospace; background: #ECE9D8; border: 1px solid #b7b29a; border-radius: 3px; padding: 1px 6px; font-size: 12px; color: #202020;">Fn</span> to switch.</p>
+      </section>
+
+      <!-- ===== DOWNLOAD (centerpiece) ===== -->
+      <section style="padding: 40px 24px 44px; background: #ECE9D8;">
+        <div class="reveal" style="max-width: 660px; margin: 0 auto;">
+          <!-- group box -->
+          <fieldset style="border: 1px solid #b7b29a; border-top-color: #d8d3bd; border-left-color: #d8d3bd; border-radius: 4px; background: linear-gradient(180deg,#f7f5ec,#ece9d8); margin: 0; padding: 22px 26px 28px;">
+            <legend style="padding: 0 8px; font-size: 12px; font-weight: bold; color: #0A246A;">Download &#8212; v0.1.0</legend>
+
+            <div style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: center;">
+              <!-- macOS -->
+              <a class="dl-btn" href="downloads/keyboard-it-0.1.0.dmg" download style="text-decoration: none; flex: 1 1 250px; min-width: 240px; display: block; padding: 18px 20px; text-align: center; border: 1px solid #2f5fb0; border-radius: 5px; background: linear-gradient(180deg,#ffffff 0%,#e8f0fb 48%,#d3e2f6 52%,#e2edfb 100%); box-shadow: 0 1px 0 rgba(255,255,255,.8) inset, 0 2px 5px rgba(10,36,106,.18); transition: transform .06s ease, box-shadow .06s ease;">
+                <div style="font-size: 26px; line-height: 1; margin-bottom: 8px; color: #0A246A;">&#63743;</div>
+                <div style="font-size: 16px; font-weight: bold; color: #0A246A;">Download for macOS</div>
+                <div style="font-family: 'Lucida Console',Consolas,monospace; font-size: 11px; color: #4a4a44; margin-top: 5px;">.dmg &#183; Apple Silicon &#183; 761 KB</div>
+              </a>
+              <!-- Windows -->
+              <a class="dl-btn" href="downloads/keyboard-it-0.1.0-x64.msi" download style="text-decoration: none; flex: 1 1 250px; min-width: 240px; display: block; padding: 18px 20px; text-align: center; border: 1px solid #2f5fb0; border-radius: 5px; background: linear-gradient(180deg,#ffffff 0%,#e8f0fb 48%,#d3e2f6 52%,#e2edfb 100%); box-shadow: 0 1px 0 rgba(255,255,255,.8) inset, 0 2px 5px rgba(10,36,106,.18); transition: transform .06s ease, box-shadow .06s ease;">
+                <div style="display: flex; justify-content: center; margin-bottom: 8px;"><span style="display: inline-grid; grid-template-columns: 11px 11px; grid-template-rows: 11px 11px; gap: 2px;"><span style="background: #f14e32;"></span><span style="background: #7cbb00;"></span><span style="background: #00a4ef;"></span><span style="background: #ffb900;"></span></span></div>
+                <div style="font-size: 16px; font-weight: bold; color: #0A246A;">Download for Windows</div>
+                <div style="font-family: 'Lucida Console',Consolas,monospace; font-size: 11px; color: #4a4a44; margin-top: 5px;">.msi &#183; x64 &#183; 5.5 MB</div>
+              </a>
+            </div>
+
+            <!-- unsigned note -->
+            <div style="margin-top: 20px; display: flex; gap: 10px; align-items: flex-start; background: #fffcdf; border: 1px solid #e3d68a; border-radius: 4px; padding: 10px 12px;">
+              <span style="flex: none; width: 18px; height: 18px; border-radius: 50%; background: #f0b400; color: #4a3800; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; margin-top: 1px;">!</span>
+              <div style="font-size: 12px; line-height: 1.6; color: #4a4030;">
+                <strong>Unsigned build.</strong> macOS: right&#8209;click the app &#8594; <em>Open</em>. Windows: on the SmartScreen prompt, click <em>More info</em> &#8594; <em>Run anyway</em>.
+              </div>
+            </div>
+          </fieldset>
+        </div>
+      </section>
+
+      <!-- ===== HOW IT WORKS ===== -->
+      <section style="padding: 42px 24px 46px; background: linear-gradient(180deg,#f3f1e6,#ece9d8); border-top: 1px solid #d8d3bd;">
+        <h2 class="reveal" style="text-align: center; margin: 0 0 30px; font-size: 20px; color: #0A246A;">How it works</h2>
+
+        <!-- diagram -->
+        <div class="reveal" style="max-width: 720px; margin: 0 auto 34px; display: flex; align-items: stretch; justify-content: center; gap: 6px; flex-wrap: wrap;">
+          <div style="flex: 1 1 180px; min-width: 160px; border: 1px solid #b7b29a; border-top-color: #fff; border-left-color: #fff; border-radius: 5px; background: #fff; padding: 16px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,.08);">
+            <div style="width: 60px; height: 38px; margin: 0 auto 10px; border: 2px solid #6b7180; border-radius: 4px 4px 2px 2px; background: linear-gradient(180deg,#dfe3ea,#c3c9d3); position: relative;"><span style="position: absolute; inset: 5px; border-radius: 2px; background: repeating-linear-gradient(90deg,#8b93a3 0 4px,transparent 4px 7px) 0/100% 6px no-repeat, repeating-linear-gradient(90deg,#8b93a3 0 4px,transparent 4px 7px) 0 9px/100% 6px no-repeat;"></span></div>
+            <div style="font-size: 13px; font-weight: bold; color: #202020;">MacBook keyboard</div>
+            <div style="font-family: 'Lucida Console',Consolas,monospace; font-size: 10px; color: #6a6a60; margin-top: 3px;">+ trackpad</div>
+          </div>
+
+          <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 130px; padding: 4px;">
+            <div style="font-size: 18px; color: #3c7a3c;">&#128274;</div>
+            <div style="font-family: 'Lucida Console',Consolas,monospace; font-size: 10px; color: #245EDC; font-weight: bold; margin: 2px 0 4px; letter-spacing: .3px;">encrypted&#160;LAN</div>
+            <div style="width: 100%; height: 2px; background: linear-gradient(90deg,#245EDC,#3c7a3c); position: relative;"><span style="position: absolute; right: -1px; top: -4px; border-left: 8px solid #3c7a3c; border-top: 5px solid transparent; border-bottom: 5px solid transparent;"></span></div>
+          </div>
+
+          <div style="flex: 1 1 180px; min-width: 160px; border: 1px solid #b7b29a; border-top-color: #fff; border-left-color: #fff; border-radius: 5px; background: #fff; padding: 16px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,.08);">
+            <div style="width: 52px; height: 40px; margin: 0 auto 10px; border: 2px solid #6b7180; border-radius: 3px; background: linear-gradient(135deg,#2a6fe8,#0b3fb0); position: relative;"><span style="position: absolute; inset: 4px; border-radius: 2px; background: linear-gradient(180deg,#bfe0ff,#7fb2f0);"></span></div>
+            <div style="font-size: 13px; font-weight: bold; color: #202020;">Windows PC</div>
+            <div style="font-family: 'Lucida Console',Consolas,monospace; font-size: 10px; color: #6a6a60; margin-top: 3px;">keyboard + mouse</div>
+          </div>
+        </div>
+
+        <!-- feature lines -->
+        <div class="reveal" style="max-width: 720px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap: 10px;">
+          <div style="display: flex; gap: 10px; align-items: flex-start; background: #fff; border: 1px solid #cfcab3; border-radius: 4px; padding: 12px 14px;">
+            <span style="flex: none; width: 8px; height: 8px; background: #3c7a3c; border-radius: 2px; margin-top: 5px;"></span>
+            <div style="font-size: 13px; line-height: 1.55;"><strong>Encrypted end to end.</strong> Traffic secured with the Noise protocol.</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: flex-start; background: #fff; border: 1px solid #cfcab3; border-radius: 4px; padding: 12px 14px;">
+            <span style="flex: none; width: 8px; height: 8px; background: #245EDC; border-radius: 2px; margin-top: 5px;"></span>
+            <div style="font-size: 13px; line-height: 1.55;"><strong>Full input.</strong> Keyboard, mouse movement, and scroll &#8212; all forwarded.</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: flex-start; background: #fff; border: 1px solid #cfcab3; border-radius: 4px; padding: 12px 14px;">
+            <span style="flex: none; width: 8px; height: 8px; background: #245EDC; border-radius: 2px; margin-top: 5px;"></span>
+            <div style="font-size: 13px; line-height: 1.55;"><strong>Always at hand.</strong> Menu&#8209;bar / system&#8209;tray indicator with login autostart.</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: flex-start; background: #fff; border: 1px solid #cfcab3; border-radius: 4px; padding: 12px 14px;">
+            <span style="flex: none; width: 8px; height: 8px; background: #3c7a3c; border-radius: 2px; margin-top: 5px;"></span>
+            <div style="font-size: 13px; line-height: 1.55;"><strong>Correct layouts.</strong> Turkish&#8209;Q &amp; AltGr handled via position&#8209;based key forwarding.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== SETUP WIZARD ===== -->
+      <section style="padding: 42px 24px 48px; background: #ECE9D8; border-top: 1px solid #d8d3bd;">
+        <h2 class="reveal" style="text-align: center; margin: 0 0 26px; font-size: 20px; color: #0A246A;">Setup in 4 steps</h2>
+
+        <div class="reveal" style="max-width: 680px; margin: 0 auto; display: flex; border: 1px solid #b7b29a; border-top-color: #fff; border-left-color: #fff; border-radius: 5px; overflow: hidden; background: #fff; box-shadow: 0 3px 8px rgba(0,0,0,.12);">
+          <!-- wizard banner -->
+          <div style="flex: none; width: 130px; background: linear-gradient(160deg,#1e6bec 0%,#0d3fb0 60%,#0a246a 100%); color: #fff; padding: 20px 16px; display: none;" data-wizard-banner="1">
+            <div style="font-size: 13px; font-weight: bold; line-height: 1.35;">keyboard&#8209;it Setup Wizard</div>
+            <div style="font-size: 11px; opacity: .8; margin-top: 8px; line-height: 1.5;">Follow the steps to pair your two machines.</div>
+            <img src="keyboard-it.png" alt="" style="width: 40px; height: 40px; border-radius: 8px; margin-top: 22px; opacity: .9;">
+          </div>
+
+          <!-- steps -->
+          <ol style="list-style: none; margin: 0; padding: 8px 0; flex: 1;">
+            <li style="display: flex; gap: 14px; align-items: flex-start; padding: 16px 22px; border-bottom: 1px solid #ececec;">
+              <span style="flex: none; width: 26px; height: 26px; border-radius: 50%; background: linear-gradient(180deg,#3f8bf5,#1257de); color: #fff; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(0,0,0,.25);">1</span>
+              <div><div style="font-size: 14px; font-weight: bold; color: #0A246A;">Install on both machines</div><div style="font-size: 12.5px; line-height: 1.55; color: #4a4a44; margin-top: 2px;">Run the .dmg on your Mac and the .msi on your Windows PC.</div></div>
+            </li>
+            <li style="display: flex; gap: 14px; align-items: flex-start; padding: 16px 22px; border-bottom: 1px solid #ececec;">
+              <span style="flex: none; width: 26px; height: 26px; border-radius: 50%; background: linear-gradient(180deg,#3f8bf5,#1257de); color: #fff; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(0,0,0,.25);">2</span>
+              <div><div style="font-size: 14px; font-weight: bold; color: #0A246A;">Pair them</div><div style="font-size: 12.5px; line-height: 1.55; color: #4a4a44; margin-top: 2px;">Set the same pairing key on both, then enter the other PC&#8217;s <span style="font-family: 'Lucida Console',Consolas,monospace; font-size: 11.5px;">IP</span> address.</div></div>
+            </li>
+            <li style="display: flex; gap: 14px; align-items: flex-start; padding: 16px 22px; border-bottom: 1px solid #ececec;">
+              <span style="flex: none; width: 26px; height: 26px; border-radius: 50%; background: linear-gradient(180deg,#3f8bf5,#1257de); color: #fff; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(0,0,0,.25);">3</span>
+              <div><div style="font-size: 14px; font-weight: bold; color: #0A246A;">Grant permissions (macOS)</div><div style="font-size: 12.5px; line-height: 1.55; color: #4a4a44; margin-top: 2px;">Enable <em>Accessibility</em> and <em>Input Monitoring</em> in System Settings.</div></div>
+            </li>
+            <li style="display: flex; gap: 14px; align-items: flex-start; padding: 16px 22px;">
+              <span style="flex: none; width: 26px; height: 26px; border-radius: 50%; background: linear-gradient(180deg,#5aa95a,#3c7a3c); color: #fff; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(0,0,0,.25);">4</span>
+              <div><div style="font-size: 14px; font-weight: bold; color: #0A246A;">Double&#8209;tap <span style="font-family: 'Lucida Console',Consolas,monospace;">Fn</span> to activate</div><div style="font-size: 12.5px; line-height: 1.55; color: #4a4a44; margin-top: 2px;">Your keyboard and trackpad now drive the Windows PC. Double&#8209;tap again to come back.</div></div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ===== FOOTER ===== -->
+      <footer style="padding: 26px 24px 30px; background: linear-gradient(180deg,#f3f1e6,#e6e2cf); border-top: 1px solid #d8d3bd; text-align: center;">
+        <p style="margin: 0 0 10px; font-size: 13px; color: #4a4a44;">A personal project, built in <strong>Rust</strong>.</p>
+        <a class="gh-btn" href="https://github.com/KutayOz/keyboard-it" style="display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: bold; text-decoration: none; color: #0A246A; border: 1px solid #b7b29a; border-radius: 4px; padding: 6px 14px; background: linear-gradient(180deg,#fff,#efece0);">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+          github.com/KutayOz/keyboard-it
+        </a>
+        <p style="margin: 14px 0 0; font-size: 11px; color: #8a8676; font-style: italic;">Not affiliated with Microsoft. We just miss Windows XP.</p>
+      </footer>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// Scroll-reveal + responsive wizard banner (was DCLogic in the Claude Design source).
+document.addEventListener('DOMContentLoaded', function () {
+  var els = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
+  els.forEach(function (el, i) {
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(18px)';
+    el.style.transition = 'opacity .5s ease, transform .5s ease';
+    el.style.transitionDelay = (Math.min(i, 3) * 0.06) + 's';
+  });
+  function reveal(el) { el.style.opacity = '1'; el.style.transform = 'none'; }
+  if (!('IntersectionObserver' in window)) {
+    els.forEach(reveal);
+  } else {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { reveal(e.target); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+    els.forEach(function (el) { io.observe(el); });
+  }
+
+  var banner = document.querySelector('[data-wizard-banner]');
+  function applyBanner() { if (banner) banner.style.display = window.innerWidth >= 620 ? 'block' : 'none'; }
+  applyBanner();
+  window.addEventListener('resize', applyBanner);
+});
+</script>
+</body>
+</html>

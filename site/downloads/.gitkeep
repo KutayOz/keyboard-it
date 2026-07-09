@@ -1,0 +1,2 @@
+# Installer'lar buraya konur (deploy öncesi). Binary'ler .gitignore'da; bu dosya
+# yalnızca klasörün repoda var olması için. Bkz. ../README.md.
