@@ -1,0 +1,70 @@
+name: build
+
+# Bulutta derleme/paketleme: fiziksel Windows/Mac gerekmeden .msi + .dmg üretir.
+# - workflow_dispatch: elle tetikle (gh workflow run build.yml)
+# - tag v* : ayrıca bir GitHub Release oluşturup installer'ları ekler
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  # Hızlı, ucuz doğrulama (Linux): tüm workspace derlenir + testler.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --verbose
+
+  # macOS: release derle -> keyboard-it.app -> .dmg (native package.sh).
+  macos:
+    runs-on: macos-14 # Apple Silicon (arm64)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: .app + .dmg paketle
+        run: bash packaging/mac/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  # Windows: ÖNCE win-receiver'ı derle (Slint/tepsi kodunun derlendiğini doğrular),
+  # SONRA cargo-wix ile .msi paketle. WiX v3 windows runner'ında hazır gelir.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: win-receiver derle (Slint compile-check)
+        run: cargo build --release -p win-receiver
+      - name: cargo-wix kur
+        run: cargo install cargo-wix --locked
+      - name: .msi paketle
+        run: cargo wix --package win-receiver --no-build --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: target/wix/*.msi
+          if-no-files-found: error
+
+  # Yalnızca v* tag'inde: installer'ları bir Release'e ekle.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
