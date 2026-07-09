@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""keyboard-it app ikonu üretici (bağımlılık: Pillow).
+"""keyboard-it app ikonu üretici — Mac + Windows (bağımlılık: Pillow).
 
 1024px bir ana logo çizer (gradyan rounded-square + klavye + yönlendirme oku),
-tüm .iconset boyutlarını LANCZOS ile küçültür, ardından `iconutil` ile .icns yapar.
+tek kaynaktan HER İKİ platformun ikonlarını üretir.
 
 Kullanım:
     python3 packaging/mac/make_icon.py
-Çıktı:
-    crates/mac-sender/assets/keyboard-it.png   (1024 ana logo)
-    crates/mac-sender/assets/keyboard-it.icns
+Çıktı (Mac):
+    crates/mac-sender/assets/keyboard-it.png    (1024 ana logo)
+    crates/mac-sender/assets/keyboard-it.icns   (.iconset -> iconutil)
+Çıktı (Windows):
+    crates/win-receiver/ui/app.ico              (16..256 çok boyutlu exe/msi ikonu)
+    crates/win-receiver/ui/tray.png             (64px sistem tepsisi ikonu)
 """
 import os
 import subprocess
@@ -107,6 +110,23 @@ def main():
     icns = os.path.join(ASSETS, "keyboard-it.icns")
     subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns], check=True)
     print("yazıldı:", icns)
+
+    # --- Windows: app.ico (çok boyutlu) + tray.png ---
+    win_ui = os.path.join(ROOT, "crates", "win-receiver", "ui")
+    os.makedirs(win_ui, exist_ok=True)
+
+    # ICO: 16..256 boyutlarını LANCZOS ile önceden üret, hepsini tek .ico'ya göm.
+    ico_sizes = [256, 128, 64, 48, 32, 24, 16]
+    frames = [master.resize((s, s), Image.LANCZOS) for s in ico_sizes]
+    ico_path = os.path.join(win_ui, "app.ico")
+    frames[0].save(ico_path, format="ICO", sizes=[(s, s) for s in ico_sizes],
+                   append_images=frames[1:])
+    print("yazıldı:", ico_path)
+
+    # Sistem tepsisi (Slint SystemTrayIcon): 64px; Windows küçük DPI'lere ölçekler.
+    tray_path = os.path.join(win_ui, "tray.png")
+    master.resize((64, 64), Image.LANCZOS).save(tray_path)
+    print("yazıldı:", tray_path)
 
 
 if __name__ == "__main__":
