@@ -13,6 +13,11 @@ use crate::{InputEvent, INPUT_MAX_LEN};
 const NOISE_PARAMS: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 const MAX_FRAME: usize = 65535; // Noise mesaj tavanı (snow::constants::MAXMSGLEN)
 
+/// Tel protokolü sürümü. İlk el sıkışma mesajının payload'unda taşınır (psk0
+/// sayesinde şifreli + doğrulanmış). Tel formatı uyumsuz şekilde değişirse artır;
+/// böylece 0.1.0/0.2.0 karışımı sessiz bağlan/kop döngüsü yerine net hata verir.
+pub const PROTOCOL_VERSION: u8 = 1;
+
 fn noise_err(e: snow::Error) -> io::Error {
     io::Error::new(io::ErrorKind::Other, format!("noise: {e:?}"))
 }
@@ -80,11 +85,21 @@ pub fn handshake_initiator<S: Read + Write>(
         .build_initiator()
         .map_err(noise_err)?;
     let mut buf = [0u8; MAX_FRAME];
-    // -> e, psk  (mesaj 1)
-    let n = hs.write_message(&[], &mut buf).map_err(noise_err)?;
+    // -> e, psk  (mesaj 1) — payload: 1 baytlık protokol sürümü (şifreli/doğrulanmış)
+    let n = hs.write_message(&[PROTOCOL_VERSION], &mut buf).map_err(noise_err)?;
     write_frame(s, &buf[..n])?;
     // <- e, ee   (mesaj 2)  — bunu okumadan into_transport_mode() PANIKLER
-    let n = read_frame(s, &mut buf)?;
+    // Karşı taraf burada bağlantıyı kapatırsa (yanlış PSK ya da sürüm reddi) ham
+    // UnexpectedEof yerine teşhis koyan bir mesaj ver; fail-closed davranış aynı.
+    let n = read_frame(s, &mut buf).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted => io::Error::new(
+            e.kind(),
+            "karşı taraf el sıkışmayı reddetti — eşleşme anahtarları iki tarafta AYNI mı?",
+        ),
+        _ => e,
+    })?;
     let mut tmp = [0u8; MAX_FRAME];
     hs.read_message(&buf[..n], &mut tmp).map_err(noise_err)?;
     hs.into_transport_mode().map_err(noise_err)
@@ -105,7 +120,20 @@ pub fn handshake_responder<S: Read + Write>(
     // <- e, psk  (mesaj 1) — yanlış PSK ise burada Decrypt hatası verir (fail-closed)
     let n = read_frame(s, &mut buf)?;
     let mut tmp = [0u8; MAX_FRAME];
-    hs.read_message(&buf[..n], &mut tmp).map_err(noise_err)?;
+    let m = hs.read_message(&buf[..n], &mut tmp).map_err(noise_err)?;
+    // Payload'un ilk baytı = karşı tarafın protokol sürümü. Boş payload = sürüm
+    // alanı olmayan eski (0.1.0 öncesi) gönderici sayılır. Fazladan baytlar ileri
+    // uyumluluk için yok sayılır. Uyuşmazlıkta sessiz bağlan/kop döngüsü yerine
+    // nedenini söyleyen net bir hata dön.
+    let peer_ver = if m >= 1 { tmp[0] } else { 0 };
+    if peer_ver != PROTOCOL_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "protokol sürümü uyumsuz: bende {PROTOCOL_VERSION}, karşıda {peer_ver} — iki tarafı da güncelle"
+            ),
+        ));
+    }
     // -> e, ee   (mesaj 2)
     let n = hs.write_message(&[], &mut buf).map_err(noise_err)?;
     write_frame(s, &buf[..n])?;
@@ -137,4 +165,54 @@ pub fn recv_event<S: Read>(
     let m = t.read_message(&frame[..n], &mut plain).map_err(noise_err)?;
     InputEvent::decode(&plain[..m])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("çözme hatası: {e:?}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    /// Loopback üzerinden bağlı bir (client, server) soket çifti kur.
+    fn pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = thread::spawn(move || TcpStream::connect(addr).unwrap());
+        let (s, _) = l.accept().unwrap();
+        (c.join().unwrap(), s)
+    }
+
+    #[test]
+    fn handshake_surum_ok_ve_olay_roundtrip() {
+        let psk = psk_from_secret("test-anahtari");
+        let (mut ci, mut cr) = pair();
+        let init = thread::spawn(move || {
+            let mut t = handshake_initiator(&mut ci, &psk).unwrap();
+            send_event(&mut t, &mut ci, &InputEvent::MouseMove { dx: 3, dy: -4 }).unwrap();
+        });
+        let mut t = handshake_responder(&mut cr, &psk).unwrap();
+        assert_eq!(recv_event(&mut t, &mut cr).unwrap(), InputEvent::MouseMove { dx: 3, dy: -4 });
+        init.join().unwrap();
+    }
+
+    #[test]
+    fn eski_surumsuz_gonderici_net_hatayla_reddedilir() {
+        let psk = psk_from_secret("test-anahtari");
+        let (mut ci, mut cr) = pair();
+        // Eski (0.1.0, sürüm alanı olmayan) göndericiyi taklit et: payload boş.
+        let init = thread::spawn(move || {
+            let mut hs = snow::Builder::new(NOISE_PARAMS.parse().unwrap())
+                .psk(0, &psk)
+                .unwrap()
+                .build_initiator()
+                .unwrap();
+            let mut buf = [0u8; MAX_FRAME];
+            let n = hs.write_message(&[], &mut buf).unwrap();
+            write_frame(&mut ci, &buf[..n]).unwrap();
+        });
+        let err = handshake_responder(&mut cr, &psk).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("protokol sürümü uyumsuz"));
+        init.join().unwrap();
+    }
 }

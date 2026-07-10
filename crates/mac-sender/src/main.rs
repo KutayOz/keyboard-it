@@ -61,21 +61,41 @@ fn main() -> io::Result<()> {
     let ip_arg = if hello_mode { args.get(2) } else { args.get(1) };
 
     // Config: kaynak-of-truth. CLI ile verilen ip config'i günceller (eski davranış).
-    let mut cfg = protocol::config::Config::load()?.unwrap_or_default();
+    // Eksik/bozuk config'te ÇIKMA: dağıtılan .app LSUIElement olduğundan stderr
+    // görünmez ve uygulama 'hiç açılmıyor' sanılırdı (bulgu düzeltmesi). Bunun
+    // yerine menü çubuğu yine kurulur, başlık 'Ayar gerekli' olur ve capture::run
+    // ilk açılışta kullanıcıyı diyalogla 'Ayarlar...'a yönlendirir.
+    let mut cfg = match protocol::config::Config::load() {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            // İlk çalıştırma: 'Ayarlar...'ın açacağı varsayılan şablonu hemen oluştur.
+            let c = protocol::config::Config { role: Role::Sender, ..Default::default() };
+            let _ = c.save();
+            c
+        }
+        Err(e) => {
+            eprintln!("config okunamadı ({e}) — varsayılanla devam ediliyor; 'Ayarlar...' ile düzelt.");
+            protocol::config::Config::default()
+        }
+    };
     cfg.role = Role::Sender;
     if let Some(ip) = ip_arg {
         cfg.peer_host = ip.clone();
         let _ = cfg.save(); // sonraki sefer argümansız çalışsın
     }
     if cfg.peer_host.is_empty() {
+        // Bilgi amaçlı (terminalden çalıştıranlar için); AKIŞI KESMEZ.
         eprintln!(
-            "peer_host ayarlı değil. Windows IP/host'unu bir kez ver:\n  \
-             cargo run -p mac-sender -- <ip-veya-host>"
+            "peer_host ayarlı değil — menü çubuğu 'Ayar gerekli' gösterecek. Windows IP/host'unu\n  \
+             cargo run -p mac-sender -- <ip-veya-host>  ile ya da 'Ayarlar...' menüsünden ver."
         );
-        return Ok(());
     }
 
     if hello_mode {
+        if cfg.peer_host.is_empty() {
+            eprintln!("--hello için adres gerekli:  cargo run -p mac-sender -- --hello <ip>");
+            return Ok(());
+        }
         return send_hello(&cfg);
     }
 

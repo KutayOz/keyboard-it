@@ -32,7 +32,23 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
     } else {
         format!("/Delete /TN {TASK} /F")
     };
-    run_elevated("schtasks.exe", &params)
+    run_elevated("schtasks.exe", &params)?;
+
+    // ShellExecuteW yalnızca LANSMANIN başarısını bildirir; schtasks asenkron
+    // çalışır ve çıkış kodu okunmaz. Hemen dönersek gui'deki is_enabled()
+    // yansıtmasıyla yarışırız (checkbox eski duruma geri döner) ve schtasks
+    // gerçek bir hatayla çıksa bile "başarılı" deriz. Sonucu doğrula: görev
+    // durumu istenen hale gelene dek kısa süre bekle, gelmezse hata döndür.
+    for _ in 0..16 {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if is_enabled() == on {
+            return Ok(());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "schtasks sonucu doğrulanamadı (görev durumu değişmedi)",
+    ))
 }
 
 /// `schtasks`'ı UAC ile yükseltip çalıştır (gizli pencere).

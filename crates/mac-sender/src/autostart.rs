@@ -1,4 +1,4 @@
-//! macOS oturum-açılışı otomatik başlatma — LaunchAgent plist + `launchctl`.
+//! macOS oturum-açılışı otomatik başlatma — LaunchAgent plist (launchctl ÇAĞRILMAZ).
 //!
 //! Windows'taki `autostart.rs`nin (Zamanlanmış Görev) macOS karşılığı. Kullanıcının
 //! `~/Library/LaunchAgents/` dizinine bir plist yazar; oturum açılışında `RunAtLoad`
@@ -56,21 +56,13 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
             exe = exe.display()
         );
         std::fs::write(&path, plist)?;
-        // Varsa eski kaydı boşalt, sonra yükle (idempotent). Hatalar yutulur:
-        // load başarısız olsa da plist bir sonraki oturumda RunAtLoad ile çalışır.
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(&path)
-            .status();
-        let _ = std::process::Command::new("launchctl")
-            .args(["load", "-w"])
-            .arg(&path)
-            .status();
+        // launchctl load/unload ÇAĞRILMAZ (bulgu düzeltmesi): uygulama LaunchAgent'tan
+        // başladıysa kendi launchd job'ıdır — unload çalışan sürecin KENDİSİNİ SIGTERM
+        // ile öldürüyordu. RunAtLoad zaten yalnız oturum açılışında değerlendirilir;
+        // plist'i yazmak yeter, çalışan örneğe dokunulmaz.
     } else if path.exists() {
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(&path)
-            .status();
+        // Yalnızca plist'i sil — unload etme: kendi job'ımızsak süreç anında ölür,
+        // applicationWillTerminate temizliği (imleci geri bağlama) çalışmazdı.
         std::fs::remove_file(&path)?;
     }
     Ok(())

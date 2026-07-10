@@ -12,6 +12,22 @@ pub fn connect_retry(addr: &str) -> io::Result<TcpStream> {
         match TcpStream::connect(addr) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
+                // Sessiz kopmalarda sonsuz bloklamayı önle: el sıkışma yanıtı (read)
+                // ve gönderim (write) en çok ~10 sn beklesin. Timeout'ta send/handshake
+                // Err döner, çağıran bağlantıyı kapatıp yeniden dener (bulgu düzeltmesi).
+                let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
+                // Ölü peer algılama: TCP keepalive — win-receiver serve.rs ile AYNI
+                // ayarlar (5 sn boşta + 3 sn aralıklı sonda). Mac uyur/Wi-Fi düşerse
+                // (yarı-açık bağlantı, RST/EOF gelmez) gönderici de ~15 sn içinde
+                // hata görüp reconnect'e düşer (protokol-ping'siz çözümün bu yarısı).
+                {
+                    use socket2::{SockRef, TcpKeepalive};
+                    let ka = TcpKeepalive::new()
+                        .with_time(Duration::from_secs(5))
+                        .with_interval(Duration::from_secs(3));
+                    let _ = SockRef::from(&s).set_tcp_keepalive(&ka);
+                }
                 return Ok(s);
             }
             Err(e) => {

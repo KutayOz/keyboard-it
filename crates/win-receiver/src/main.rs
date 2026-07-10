@@ -17,17 +17,28 @@ mod autostart;
 mod gui;
 
 fn main() -> io::Result<()> {
-    let cfg = protocol::config::Config::load()?.unwrap_or_default();
+    // Bozuk config.toml'da sessizce ölme (release'te konsol yok → çift tıklama
+    // "hiçbir şey olmuyor" gibi görünürdü): varsayılanlara düş, hatayı GUI'ye taşı.
+    let (cfg, cfg_err) = match protocol::config::Config::load() {
+        Ok(c) => (c.unwrap_or_default(), None),
+        Err(e) => (
+            protocol::config::Config::default(),
+            Some(format!("config.toml okunamadı, varsayılanlar yüklendi: {e}")),
+        ),
+    };
 
     #[cfg(windows)]
     {
         if !single_instance() {
             return Ok(()); // zaten çalışıyor
         }
-        gui::run(cfg)
+        gui::run(cfg, cfg_err)
     }
     #[cfg(not(windows))]
     {
+        if let Some(w) = &cfg_err {
+            eprintln!("uyarı: {w}");
+        }
         serve::serve(&cfg, |_| {})
     }
 }

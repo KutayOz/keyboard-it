@@ -6,6 +6,11 @@ members = [
     "crates/win-receiver",
 ]
 
+# Tek sürüm kaynağı: üç crate de buradan miras alır (version.workspace = true).
+# Böylece dmg (mac) ve msi (win) sürümleri asla ayrışamaz.
+[workspace.package]
+version = "0.1.0"
+
 # Dağıtım için küçük, tek dosyalık release exe (.msi içine girer).
 # Not: opt-level/lto tüm workspace'i (mac-sender dahil) etkiler. panic="abort"
 # cross-platform riski (unwind farkı) yüzünden bilerek EKLENMEDİ.

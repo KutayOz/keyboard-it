@@ -1,12 +1,13 @@
 [package]
 name = "win-receiver"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "keyboard-it alıcı — Mac'ten şifreli tuş/fare olaylarını Windows'a enjekte eder (tepsi + ayar penceresi)"
 authors = ["KutayOz"]
 
 [dependencies]
 protocol = { path = "../protocol" }
+socket2 = "0.5"   # TCP keepalive — ölü/yarı-açık bağlantı algılama (serve.rs)
 
 # windows/tray-icon/tao YALNIZCA Windows hedefinde çözülür/derlenir.
 # macOS'ta bu blok yok sayılır (Mac build'i bunları çekmez).

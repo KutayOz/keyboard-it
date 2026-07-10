@@ -29,7 +29,9 @@ fn config_from_ui(w: &SettingsWindow) -> Config {
     }
 }
 
-pub fn run(cfg: Config) -> std::io::Result<()> {
+/// `cfg_warning`: açılışta config yüklenirken oluşan hata (varsa) — release'te
+/// konsol olmadığından kullanıcıya buradan (status satırı) gösterilir.
+pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     let tray = Tray::new().map_err(io_err)?;
     let settings = SettingsWindow::new().map_err(io_err)?;
 
@@ -64,21 +66,40 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
             let cfg = config_from_ui(&s);
             let _ = cfg.save();
 
-            // Bağlantı durumu -> status-line (arka thread'den, UI'a post et).
+            // Bağlantı durumu -> status-line + tepsi (arka thread'den, UI'a post et).
             let on_conn = {
                 let sw = sw.clone();
-                move |connected: bool| {
+                let tw = tw.clone();
+                move |status: serve::ConnStatus| {
                     let sw = sw.clone();
+                    let tw = tw.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(s) = sw.upgrade() {
                             s.set_status_line(
-                                if connected {
-                                    "Bağlandı — şifreli kanal kuruldu."
-                                } else {
-                                    "Bağlantı kapandı — dinleniyor."
+                                match status {
+                                    serve::ConnStatus::Connected => {
+                                        "Bağlandı — şifreli kanal kuruldu."
+                                    }
+                                    serve::ConnStatus::Disconnected => {
+                                        "Bağlantı kapandı — dinleniyor."
+                                    }
+                                    // Dağıtımda en olası kurulum hatası: iki
+                                    // tarafa farklı anahtar yazılması. Görünür olsun.
+                                    serve::ConnStatus::HandshakeFailed => {
+                                        "El sıkışma başarısız — eşleşme anahtarı iki tarafta aynı mı?"
+                                    }
                                 }
                                 .into(),
                             );
+                        }
+                        // Tepsi de bir bakışta göstersin: ikon + tooltip +
+                        // menüdeki "Durum:" satırı bu özellikten türetilir (slint).
+                        if let Some(t) = tw.upgrade() {
+                            t.set_conn(match status {
+                                serve::ConnStatus::Connected => 1,
+                                serve::ConnStatus::Disconnected => 0,
+                                serve::ConnStatus::HandshakeFailed => 2,
+                            });
                         }
                     });
                 }
@@ -89,6 +110,7 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
                     *listener.borrow_mut() = Some(h);
                     if let Some(t) = tw.upgrade() {
                         t.set_active(true);
+                        t.set_conn(0); // yeni dinleyici: "Bağlantı bekleniyor"
                     }
                     s.set_active(true);
                     s.set_status_line("Başlatıldı — bağlantı bekleniyor.".into());
@@ -203,6 +225,13 @@ pub fn run(cfg: Config) -> std::io::Result<()> {
             .unwrap_or(false);
     if have_secret {
         do_start();
+    }
+
+    // Config okunamadıysa kullanıcı mutlaka görsün: uyarıyı status satırına yaz
+    // ve ayar penceresini aç (tepsi yine de normal çalışır).
+    if let Some(w) = cfg_warning {
+        settings.set_status_line(w.into());
+        let _ = settings.show();
     }
 
     tray.show().map_err(io_err)?;

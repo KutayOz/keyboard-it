@@ -9,16 +9,23 @@ tarafı. Menü çubuğunda küçük bir ikonla çalışır (Dock'ta görünmez).
 
 1. `keyboard-it-<sürüm>.dmg`'yi çift tıkla.
 2. **keyboard-it**'i açılan pencerede **Applications** klasörüne sürükle.
-3. İlk açılış (uygulama imzasız): Applications'ta **sağ-tık → Aç → Aç**
-   ("tanımlanamayan geliştirici" uyarısını bir kez geçmek için).
+3. İlk açılış (uygulama imzasız): uygulamayı normal aç → "Apple doğrulayamadı /
+   açılmadı" uyarısını kapat → Sistem Ayarları → **Gizlilik ve Güvenlik** →
+   en alttaki "keyboard-it engellendi" satırında **Yine de Aç** → uygulamayı
+   tekrar aç. (macOS 14 ve öncesi: Applications'ta **sağ-tık → Aç → Aç** yeterli;
+   Sequoia 15+ bu kısayolu imzasız uygulamalar için kaldırdı.)
 4. **İzinler (şart):** Sistem Ayarları → **Gizlilik ve Güvenlik**:
    - **Erişilebilirlik** → keyboard-it'i ekle/işaretle
    - **Girdi İzleme** → keyboard-it'i ekle/işaretle
 
    İzni verdikten sonra uygulamayı bir kez kapatıp yeniden aç (yeni izin
    çalışan sürece yansımaz).
-5. Menü çubuğunda 🔒 **PASIF** ikonu belirir. **Fn'e çift bas** → 🟢 **AKTIF**;
-   artık klavye/fare Windows'a gider. Tekrar Fn+Fn → PASIF.
+5. **Fn ayarı (şart):** Sistem Ayarları → **Klavye** → "🌐/fn tuşuna basınca" →
+   **Hiçbir Şey Yapma**. Yoksa macOS çift-Fn'i Dikte/Emoji paneli için yakalar
+   ve geçiş (toggle) güvenilmez çalışır.
+6. Menü çubuğunda 🔒 **PASIF** ikonu belirir. **Fn'e çift bas** → 🟢 **AKTIF**;
+   artık klavye/fare Windows'a gider. Tekrar Fn+Fn → PASIF. (Çift-Fn tepki
+   vermiyorsa 5. adımdaki Fn ayarını kontrol et.)
 
 ### Menü çubuğu öğeleri
 - **Ayarlar...** → `config.toml`'u metin editöründe açar (Windows IP'sini burada
@@ -60,7 +67,8 @@ packaging/mac/package.sh
 ### Notlar
 - **Ad-hoc imza:** `codesign -s -` ile imzalanır (Apple Silicon imzasız ikiliyi
   öldürür). Apple Developer sertifikası **yok** — bu yüzden ilk açılışta Gatekeeper
-  "sağ-tık → Aç" ister. Kişisel kullanım için yeterli; App Store/notarization ileride.
+  onayı gerekir (Gizlilik ve Güvenlik → "Yine de Aç"; bkz. bölüm 1, adım 3).
+  Kişisel kullanım için yeterli; App Store/notarization ileride.
 - **Mimari:** çıktı çalıştığın Mac'in mimarisi (Apple Silicon'da `arm64`). Universal
   (arm64+x86_64) için `x86_64-apple-darwin` hedefi kurulup `lipo` ile birleştirilebilir
   — kişisel kullanımda gerekmez.

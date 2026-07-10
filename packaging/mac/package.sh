@@ -14,8 +14,13 @@ DISPLAY_NAME="keyboard-it"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-# Sürümü mac-sender Cargo.toml'dan çek.
-VERSION="$(grep -m1 '^version' crates/mac-sender/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+# Sürümü kök Cargo.toml'daki [workspace.package] bölümünden çek
+# (crate'ler version.workspace = true ile buradan miras alıyor).
+VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+if [ -z "$VERSION" ] || [[ "$VERSION" == *=* ]]; then
+  echo "HATA: kök Cargo.toml'dan sürüm okunamadı" >&2
+  exit 1
+fi
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 ICNS="$ROOT/crates/mac-sender/assets/$APP_NAME.icns"

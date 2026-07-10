@@ -12,14 +12,26 @@ statik sürümü. Cloudflare Pages'e (veya herhangi bir statik host'a) olduğu g
   deploy'dan önce buraya koyulur.
 
 ## Deploy'dan önce: installer'ları yerleştir
-CI'dan gelen güncel dosyaları buraya kopyala:
+CI artifact'larını indir (`gh workflow run build.yml` → `gh run download <run-id> -D dist/ci`)
+ve SABİT (sürümsüz) hedef adlarla kopyala — index.html bu adlara link verir,
+sürüm bump'ında link kırılmaz:
 
 ```bash
-cp dist/upload/keyboard-it-0.1.0.dmg      site/downloads/
-cp dist/upload/keyboard-it-0.1.0-x64.msi  site/downloads/
+cp dist/ci/macos-dmg/keyboard-it-*.dmg        site/downloads/keyboard-it-macos.dmg
+cp dist/ci/windows-msi/keyboard-it-*-x64.msi  site/downloads/keyboard-it-windows-x64.msi
 ```
 
-(Yeni sürüm için: `gh workflow run build.yml` → artifact'ları indir → `dist/upload`'a al.)
+(CI, cargo-wix çıktısını paketlemeden sonra `keyboard-it-<sürüm>-x64.msi` adına
+çevirir — bkz. `.github/workflows/build.yml` "ürün adına çevir" adımı.)
+
+## Sürüm bump kontrol listesi
+İndirme linkleri sürümsüz olduğu için değişmez; `index.html`'de yalnızca iki nokta
+elle güncellenir:
+1. `<legend>` içindeki "Download — vX.Y.Z" sürümü,
+2. buton altındaki dosya boyutları (`ls -lh site/downloads/` ile bak).
+
+Eski sürümün dosyaları kopyalamada üzerine yazıldığı için `downloads/`'ta bayat
+dosya kalmaz.
 
 ## Cloudflare Pages'e yükleme
 - **Dashboard (en basit):** Cloudflare Pages → "Upload assets" → tüm `site/` klasörünü

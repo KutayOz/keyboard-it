@@ -1,10 +1,11 @@
 [package]
 name = "mac-sender"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]
 protocol = { path = "../protocol" }
+socket2 = "0.5"   # TCP keepalive — yarı-açık bağlantı algılama (net.rs, win-receiver ile parite)
 
 # core-graphics/core-foundation/objc2 YALNIZCA macOS hedefinde çözülür/derlenir.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -47,6 +47,11 @@ jobs:
         run: cargo install cargo-wix --locked
       - name: .msi paketle
         run: cargo wix --package win-receiver --no-build --nocapture
+      # cargo-wix çıktı adını paket adından türetir (win-receiver-<sürüm>-x86_64.msi);
+      # dmg ve site linkiyle aynı ürün adını taşısın diye keyboard-it-<sürüm>-x64.msi yap.
+      - name: .msi'yi ürün adına çevir
+        shell: pwsh
+        run: Get-Item target/wix/*.msi | Rename-Item -NewName { $_.Name -replace '^win-receiver','keyboard-it' -replace 'x86_64','x64' }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-msi
