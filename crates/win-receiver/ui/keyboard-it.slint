@@ -4,9 +4,10 @@ import { LineEdit, Button, CheckBox, VerticalBox, HorizontalBox, GroupBox, About
 export component SettingsWindow inherits Window {
     title: "keyboard-it";
     preferred-width: 380px;
-    preferred-height: 360px;
+    preferred-height: 400px;
 
     in property <bool> active;                 // listener state (ACTIVE/INACTIVE)
+    in property <string> this-pc;              // "This PC: HOSTNAME — 192.168.1.x" (from Rust)
     in-out property <string> pairing-key;
     in-out property <string> peer-ip;
     in-out property <string> peer-port;
@@ -17,6 +18,7 @@ export component SettingsWindow inherits Window {
     callback stop-listener();
     callback save();
     callback autostart-changed(bool);
+    callback generate-key();
 
     VerticalBox {
         padding: 12px;
@@ -29,12 +31,25 @@ export component SettingsWindow inherits Window {
             font-weight: 700;
         }
 
+        // Identity line: what the user reads aloud if automatic discovery fails.
+        Text { text: root.this-pc; font-size: 12px; }
+
         GroupBox {
             title: "Settings";
             VerticalBox {
                 spacing: 6px;
                 Text { text: "Pairing key (must be IDENTICAL on both machines)"; }
-                LineEdit { placeholder-text: "KEYBOARD_IT_KEY"; text <=> root.pairing-key; }
+                HorizontalBox {
+                    padding: 0px;
+                    spacing: 6px;
+                    LineEdit {
+                        placeholder-text: "KEYBOARD_IT_KEY";
+                        text <=> root.pairing-key;
+                        horizontal-stretch: 1;
+                    }
+                    Button { text: "Generate"; clicked => { root.generate-key(); } }
+                }
+                Text { text: "Use the same key on the Mac."; font-size: 11px; color: #808080; }
                 Text { text: "Peer IP (the sending Mac)"; }
                 LineEdit { placeholder-text: "192.168.1.x"; text <=> root.peer-ip; }
                 Text { text: "Port"; }

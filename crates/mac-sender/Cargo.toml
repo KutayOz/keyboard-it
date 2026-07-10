@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 protocol = { path = "../protocol" }
 socket2 = "0.5"   # TCP keepalive — half-open connection detection (net.rs, parity with win-receiver)
+mdns-sd = "0.20"  # browse for the receiver on the LAN — replaces hand-typing the peer IP
 
 # core-graphics/core-foundation/objc2 resolve/compile only on macOS targets.
 [target.'cfg(target_os = "macos")'.dependencies]

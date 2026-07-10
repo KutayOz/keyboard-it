@@ -205,17 +205,72 @@ fn accept_loop(
     }
 }
 
+/// Advertise the listener over mDNS/DNS-SD so the Mac discovers this PC without the
+/// user reading IPs off `ipconfig`. Failure is NON-fatal — manual host entry on the
+/// Mac still works — so errors only go to the (debug-build) console.
+#[cfg(windows)]
+fn advertise_mdns(port: u16) -> Option<(mdns_sd::ServiceDaemon, String)> {
+    let host = crate::netinfo::hostname();
+    let daemon = match mdns_sd::ServiceDaemon::new() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("mDNS advertising unavailable: {e}");
+            return None;
+        }
+    };
+    // No explicit IP list: addr_auto lets the daemon track interface addresses itself,
+    // so the advertisement stays correct when the PC switches networks while running.
+    let info = match mdns_sd::ServiceInfo::new(
+        protocol::MDNS_SERVICE,
+        &host,
+        &format!("{host}.local."),
+        (),
+        port,
+        None::<std::collections::HashMap<String, String>>,
+    ) {
+        Ok(i) => i.enable_addr_auto(),
+        Err(e) => {
+            eprintln!("mDNS service info rejected: {e}");
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+    let fullname = info.get_fullname().to_string();
+    match daemon.register(info) {
+        Ok(()) => Some((daemon, fullname)),
+        Err(e) => {
+            eprintln!("mDNS register failed: {e}");
+            let _ = daemon.shutdown();
+            None
+        }
+    }
+}
+
 /// Stoppable listener handle.
 pub struct Handle {
     stop: Arc<AtomicBool>,
     conn: ConnSlot,
     thread: Option<JoinHandle<()>>,
+    /// mDNS daemon + registered service fullname; dropped/unregistered in `stop()` so a
+    /// stopped listener does not keep advertising a port nobody answers on.
+    #[cfg(windows)]
+    mdns: Option<(mdns_sd::ServiceDaemon, String)>,
 }
 
 impl Handle {
-    /// Stop listening: flip the flag, cut the live connection, join the accept thread
-    /// (the accept loop does not block, so the join returns quickly).
+    /// Stop listening: withdraw the mDNS advertisement, flip the flag, cut the live
+    /// connection, join the accept thread (the accept loop does not block, so the join
+    /// returns quickly).
     pub fn stop(&mut self) {
+        #[cfg(windows)]
+        if let Some((daemon, fullname)) = self.mdns.take() {
+            // Wait briefly for the unregister so the "goodbye" packets actually leave
+            // before the daemon is shut down; ignore errors — stopping must not fail.
+            if let Ok(rx) = daemon.unregister(&fullname) {
+                let _ = rx.recv_timeout(Duration::from_secs(1));
+            }
+            let _ = daemon.shutdown();
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some((_, s)) = self.conn.lock().unwrap().take() {
             let _ = s.shutdown(Shutdown::Both);
@@ -250,7 +305,13 @@ pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
     let (s, c) = (stop.clone(), conn.clone());
     let thread = thread::spawn(move || accept_loop(listener, psk, &s, &c, &on_conn));
 
-    Ok(Handle { stop, conn, thread: Some(thread) })
+    Ok(Handle {
+        stop,
+        conn,
+        thread: Some(thread),
+        #[cfg(windows)]
+        mdns: advertise_mdns(cfg.port),
+    })
 }
 
 /// Non-Windows dry-run: blocking variant (no stop; listens until the process dies).

@@ -90,8 +90,8 @@ pub fn show_alert(mtm: MainThreadMarker, title: &str, text: &str) {
 }
 
 /// Two-button dialog: 'Open Settings' / 'Later'. Returns true when the user chose to
-/// open settings; the caller decides WHAT to open (config.toml for first-run setup,
-/// the System Settings Input Monitoring pane for the permission dialog).
+/// open settings; the caller decides WHAT to open (the native settings window for
+/// first-run setup, the System Settings Input Monitoring pane for the permission dialog).
 pub fn show_setup_alert(mtm: MainThreadMarker, title: &str, text: &str) -> bool {
     let app = NSApplication::sharedApplication(mtm);
     unsafe {
@@ -104,6 +104,24 @@ pub fn show_setup_alert(mtm: MainThreadMarker, title: &str, text: &str) -> bool 
     let _ = alert.addButtonWithTitle(ns_string!("Later"));
     // The first button added = NSAlertFirstButtonReturn.
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
+}
+
+/// N-button modal dialog; buttons[0] is the default (Return key). Returns the
+/// 0-based index of the clicked button. The permission wizard builds its
+/// Continue/check/Later chains from this.
+pub fn show_choice_alert(mtm: MainThreadMarker, title: &str, text: &str, buttons: &[&str]) -> usize {
+    let app = NSApplication::sharedApplication(mtm);
+    unsafe {
+        let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
+    }
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    for b in buttons {
+        let _ = alert.addButtonWithTitle(&NSString::from_str(b));
+    }
+    // Buttons answer NSAlertFirstButtonReturn + index, in the order they were added.
+    (alert.runModal() - objc2_app_kit::NSAlertFirstButtonReturn).max(0) as usize
 }
 
 /// While ACTIVE, CGAssociateMouseAndMouseCursorPosition(0) freezes the cursor.
@@ -142,10 +160,12 @@ define_class!(
             NSApplication::sharedApplication(mtm).terminate(None);
         }
 
-        // Menu "Settings..." -> open config.toml in an editor.
+        // Menu "Settings..." -> the native settings window (settings.rs). The old
+        // config.toml-in-a-text-editor path (Config::edit) is gone from the menu:
+        // a non-technical user never has to see the file.
         #[unsafe(method(settings:))]
         fn settings(&self, _sender: Option<&AnyObject>) {
-            let _ = protocol::config::Config::edit();
+            crate::settings::open(self.mtm());
         }
 
         // Menu "Start at Login" -> toggle the LaunchAgent and update the checkmark.

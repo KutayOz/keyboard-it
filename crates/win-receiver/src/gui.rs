@@ -49,6 +49,16 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     settings.set_active(false);
     tray.set_active(false);
 
+    // Identity line — hostname + LAN IPv4(s) — so the user can read this PC's address
+    // aloud (and type it on the Mac) if mDNS discovery does not work on their network.
+    let ips = crate::netinfo::lan_ipv4s();
+    let ip_text = if ips.is_empty() {
+        "no LAN IPv4 found".to_string()
+    } else {
+        ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ")
+    };
+    settings.set_this_pc(format!("This PC: {} — {}", crate::netinfo::hostname(), ip_text).into());
+
     // Listener handle — lives on the UI thread (Rc, not Send; fine here).
     let listener: Rc<RefCell<Option<serve::Handle>>> = Rc::new(RefCell::new(None));
 
@@ -197,6 +207,15 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
                     }
                 }
                 Err(e) => s.set_status_line(format!("Could not save: {e}").into()),
+            }
+        });
+    }
+    {
+        let sw = settings.as_weak();
+        settings.on_generate_key(move || {
+            if let Some(s) = sw.upgrade() {
+                s.set_pairing_key(protocol::secure::generate_key().into());
+                s.set_status_line("Key generated — enter the same key on the Mac, then Save.".into());
             }
         });
     }

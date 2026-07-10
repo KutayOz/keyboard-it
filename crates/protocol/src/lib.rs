@@ -186,6 +186,10 @@ impl InputEvent {
 /// Default TCP port: mac-sender connects to it, win-receiver listens on it.
 pub const DEFAULT_PORT: u16 = 5599;
 
+/// mDNS/DNS-SD service type. Defined once here so the win-receiver advertiser
+/// and the mac-sender browser can never drift apart on the service name.
+pub const MDNS_SERVICE: &str = "_keyboard-it._tcp.local.";
+
 use std::io::{self, Read, Write};
 
 impl KeyEvent {

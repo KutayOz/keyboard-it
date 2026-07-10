@@ -23,6 +23,38 @@ fn noise_err(e: snow::Error) -> io::Error {
     io::Error::new(io::ErrorKind::Other, format!("noise: {e:?}"))
 }
 
+/// Generate a fresh pairing key: 32 OS-random bytes as unpadded base64url
+/// (43 chars, alphabet A-Za-z0-9-_). That alphabet needs no escaping in TOML
+/// basic strings, shells, or GUI text fields, and no '=' padding can be lost
+/// to copy/paste trimming. The key feeds psk_from_secret(), which hashes any
+/// string, so the exact encoding is a UX choice, not a crypto one.
+pub fn generate_key() -> String {
+    let mut bytes = [0u8; 32];
+    // OS RNG failure is unrecoverable and effectively impossible on the
+    // supported desktop platforms; a panic beats silently weak keys.
+    getrandom::fill(&mut bytes).expect("OS RNG unavailable");
+    base64url_nopad(&bytes)
+}
+
+/// Minimal base64url (RFC 4648 section 5) encoder without padding — one call
+/// site does not justify pulling a base64 crate into the workspace.
+fn base64url_nopad(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        // Pack up to 3 bytes into a 24-bit group, zero-filling the tail.
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        // 1 input byte -> 2 output chars, 2 -> 3, 3 -> 4 (no '=' padding).
+        for i in 0..=chunk.len() {
+            out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
 /// Compress the user's passphrase (any length) into a fixed 32-byte PSK with
 /// BLAKE2s-256. The domain-separation prefix keeps the same passphrase from
 /// deriving the same PSK in another context.
@@ -185,6 +217,35 @@ mod tests {
         let c = thread::spawn(move || TcpStream::connect(addr).unwrap());
         let (s, _) = l.accept().unwrap();
         (c.join().unwrap(), s)
+    }
+
+    #[test]
+    fn base64url_nopad_known_vectors() {
+        // RFC 4648 test vectors, '=' padding stripped, to pin the encoder.
+        assert_eq!(base64url_nopad(b""), "");
+        assert_eq!(base64url_nopad(b"f"), "Zg");
+        assert_eq!(base64url_nopad(b"fo"), "Zm8");
+        assert_eq!(base64url_nopad(b"foo"), "Zm9v");
+        assert_eq!(base64url_nopad(b"foobar"), "Zm9vYmFy");
+        // Bytes that hit the url-safe alphabet ('-' and '_', not '+'/'/').
+        assert_eq!(base64url_nopad(&[0xfb, 0xff]), "-_8");
+    }
+
+    #[test]
+    fn generate_key_unique_length_and_charset() {
+        let a = generate_key();
+        let b = generate_key();
+        assert_ne!(a, b, "two keys must differ");
+        // 32 bytes -> ceil(32*8/6) = 43 chars unpadded.
+        assert_eq!(a.len(), 43);
+        // Alphabet must stay TOML-basic-string safe: no quote, backslash,
+        // or control chars — nothing that would ever need escaping.
+        for k in [&a, &b] {
+            assert!(
+                k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "unexpected char in key: {k}"
+            );
+        }
     }
 
     #[test]

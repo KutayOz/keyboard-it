@@ -17,6 +17,8 @@ mod serve;
 mod autostart;
 #[cfg(windows)]
 mod gui;
+#[cfg(windows)]
+mod netinfo;
 
 fn main() -> io::Result<()> {
     // Do not die silently on a broken config.toml (release builds have no console, so a

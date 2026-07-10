@@ -20,6 +20,8 @@ mod capture;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod menubar;
+#[cfg(target_os = "macos")]
+mod settings;
 
 use std::io;
 

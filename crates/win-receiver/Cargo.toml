@@ -8,6 +8,9 @@ authors = ["KutayOz"]
 [dependencies]
 protocol = { path = "../protocol" }
 socket2 = "0.5"   # TCP keepalive — dead/half-open connection detection (serve.rs)
+# Cross-platform crate, so NOT in the cfg(windows) block: keeping it here lets
+# `cargo check --workspace` on macOS resolve/lock it too. Usage is gated in code.
+mdns-sd = "0.20"  # advertise the receiver on the LAN so the Mac finds it without ipconfig
 
 # windows/slint are resolved/compiled ONLY on the Windows target.
 # macOS builds ignore this block entirely.

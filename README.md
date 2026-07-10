@@ -57,44 +57,42 @@ If you install from the `.dmg` instead, macOS blocks the unsigned app on first o
   **Open Anyway** → open the app again.
 - macOS 14 and earlier: right-click the app in Applications → Open → Open.
 
-Required settings — the app cannot capture input without them:
+On first launch the app walks you through the permissions it needs — the app cannot capture
+input without them:
 
 1. System Settings → Privacy & Security → **Input Monitoring** → enable keyboard-it.
 2. System Settings → Privacy & Security → **Accessibility** → enable keyboard-it.
 3. System Settings → Keyboard → "Press fn key to" → **Do Nothing**. Otherwise macOS grabs
    double-Fn for Dictation or the emoji picker and the toggle misfires.
 
-Quit and reopen the app after granting permissions; they only apply to a freshly launched
-process. Permissions are tied to the binary's path, so grant them again if you move the
-`.app`.
+The app relaunches itself once permissions are granted (they only apply to a freshly
+launched process). Permissions are tied to the binary's path, so grant them again if you
+move the `.app`.
 
 The app lives in the menu bar (no Dock icon) with three entries: **Settings** opens the
-config file in a text editor, **Start at Login** toggles a LaunchAgent, and **Quit** exits
-and restores normal cursor behavior.
+settings window, **Start at Login** toggles a LaunchAgent, and **Quit** exits and restores
+normal cursor behavior.
 
 ### Windows
 
 Run the `.msi`. SmartScreen flags the unsigned installer: click **More info → Run anyway**.
-The receiver runs in the system tray; its settings window takes the pairing key and port and
-can enable start-at-login. Allow it through the Windows firewall when prompted — it listens
-on the configured TCP port.
+The receiver runs in the system tray; its settings window generates the pairing key, sets
+the port, and can enable start-at-login. Allow it through the Windows firewall when
+prompted — it listens on the configured TCP port.
 
 ### Pairing
 
-Both machines read a `config.toml` and must share the same pairing key. Generate one strong
-random value (for example with `openssl rand -base64 24`) and enter it on both sides.
+Both machines must share the same pairing key:
 
-| Field           | Meaning                                                            |
-|-----------------|--------------------------------------------------------------------|
-| `shared_secret` | Pairing key. Must be identical on both machines.                   |
-| `peer_host`     | LAN IP of the Windows PC. Sender only; the receiver only listens.  |
-| `role`          | `sender` on the Mac, `receiver` on Windows.                        |
-| `port`          | TCP port, default `5599`. Must match on both sides.                |
+1. On Windows, open the settings window from the tray icon and click **Generate** next to
+   the pairing key.
+2. On the Mac, open **Settings** from the menu bar, pick your PC from the discovered list,
+   enter the same key, and click **Save**.
 
-On the Mac, edit the file via the menu bar **Settings** entry; it lives at
-`~/Library/Application Support/com.keyboard-it.keyboard-it/config.toml`. On Windows, use the
-settings window from the tray icon. A missing key is fatal — the programs refuse to start —
-and a mismatched key fails the handshake.
+The Mac finds the PC by name over the local network, so no IP addresses are needed; if
+discovery fails, the Windows window shows the PC's name and IP to enter manually. The TCP
+port defaults to `5599` and must match on both sides. A missing key is fatal — the programs
+refuse to start — and a mismatched key fails the handshake.
 
 ## Build from source
 
