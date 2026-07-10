@@ -12,6 +12,10 @@ site/downloads/*.msi
 # Icon intermediate output (make_icon.py produces it; the .icns/.png sources are committed)
 *.iconset/
 
+# dmg background intermediates (make_dmg_background.py; the retina .tiff is committed)
+packaging/mac/dmg-background.png
+packaging/mac/dmg-background@2x.png
+
 # macOS
 .DS_Store
 

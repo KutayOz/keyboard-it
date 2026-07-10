@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # keyboard-it — macOS distribution packager.
 # Builds release -> keyboard-it.app (menu-bar agent) -> keyboard-it-<version>.dmg
-# Native tools only: cargo + codesign + hdiutil. No extra dependencies.
+# Tools: cargo + codesign + dmgbuild (pip; auto-installed if missing).
 #
 # Usage:   packaging/mac/package.sh
 # Output:  dist/keyboard-it.app  and  dist/keyboard-it-<version>.dmg
@@ -76,14 +76,20 @@ PLIST
 echo "==> ad-hoc signing (codesign -s -)"
 codesign --force -s - "$APP" 2>/dev/null || echo "   (codesign skipped — not fatal)"
 
-echo "==> creating .dmg"
+# Branded installer window (background + fixed icon layout) via dmgbuild.
+# The retina background TIFF is committed; regenerate with make_dmg_background.py.
+if ! python3 -c "import dmgbuild" >/dev/null 2>&1; then
+  echo "==> installing dmgbuild (pip --user)"
+  # Homebrew Python is PEP 668 "externally managed"; --user still needs the override.
+  python3 -m pip install --quiet --user dmgbuild 2>/dev/null ||
+    python3 -m pip install --quiet --user --break-system-packages dmgbuild
+fi
+
+echo "==> creating .dmg (dmgbuild)"
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
 rm -f "$DMG"
-STAGING="$(mktemp -d)"
-cp -R "$APP" "$STAGING/"
-ln -s /Applications "$STAGING/Applications"
-hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
-rm -rf "$STAGING"
+python3 -m dmgbuild -s "$ROOT/packaging/mac/dmg-settings.py" \
+  -D app="$APP" -D settings_dir="$ROOT/packaging/mac" "$APP_NAME" "$DMG"
 
 echo ""
 echo "done:"
