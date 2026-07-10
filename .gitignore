@@ -20,3 +20,6 @@ site/downloads/*.msi
 **/.kalfa/
 
 # Cargo.lock: binary/uygulama olduğu için commit EDİLİR (bilerek ignore edilmedi).
+
+# wrangler yerel önbelleği (deploy aracı; repoya girmez)
+.wrangler/
