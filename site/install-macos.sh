@@ -3,16 +3,17 @@
 #
 # curl ile indirilen dosyalara macOS quarantine bayrağı eklenmez; bu yüzden
 # Gatekeeper'ın "tanımlanamayan geliştirici" uyarısı hiç çıkmaz.
-# Kullanım:  curl -fsSL https://keyboard-it.pages.dev/install-macos.sh | sh
+# Kullanım:  curl -fsSL https://kutayoz.github.io/keyboard-it/install-macos.sh | sh
 #
-# NOT: Deploy edilen domain değişirse yalnızca aşağıdaki BASE_URL güncellenir
-# (bkz. site/README.md).
+# NOT: DMG, GitHub Releases'in sürümden bağımsız 'latest' linkinden iner;
+# site domain'i değişse bile bu betiğin çalışması bozulmaz (bkz. site/README.md).
 
 set -eu
 
-BASE_URL="https://keyboard-it.pages.dev"
+# Elle indirme sayfası (hata mesajlarında gösterilir).
+BASE_URL="https://kutayoz.github.io/keyboard-it"
 
-DMG_URL="$BASE_URL/downloads/keyboard-it-macos.dmg"
+DMG_URL="https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-macos.dmg"
 APP_NAME="keyboard-it.app"
 DEST_DIR="/Applications"
 TMP_DMG="/tmp/keyboard-it-macos.$$.dmg"

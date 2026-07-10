@@ -69,7 +69,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      # Sitedeki 'releases/latest/download/<sabit-ad>' linkleri sürümden bağımsız
+      # çalışsın: sürümlü dosyaların YANINA sabit adlı kopyalar da eklenir.
+      - name: Sabit adlı kopyalar (latest/download linkleri için)
+        run: |
+          mkdir -p latest
+          cp artifacts/macos-dmg/keyboard-it-*.dmg latest/keyboard-it-macos.dmg
+          cp artifacts/windows-msi/keyboard-it-*-x64.msi latest/keyboard-it-windows-x64.msi
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*
+            latest/*
           generate_release_notes: true
