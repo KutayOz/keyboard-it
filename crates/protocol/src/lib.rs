@@ -1,16 +1,16 @@
-//! Paylaşılan tel formatı (wire format) — mac-sender ve win-receiver'ın ORTAK dili.
+//! Shared wire format — the common language of mac-sender and win-receiver.
 //!
-//! Gerçek "köprü" budur: tuş olayının nasıl kodlandığı bir kez burada tanımlanır,
-//! iki taraf da aynı `KeyEvent` tipini `use` eder. Böylece protokol anlaşmazlığı
-//! derleme zamanında imkansız hale gelir.
+//! This is the actual "bridge": how an event is encoded is defined once here and
+//! both binaries `use` the same types, so a protocol mismatch between them is a
+//! compile-time error.
 
-/// LAN'de tuş vuruşlarını şifreleyen Noise (NNpsk0) katmanı.
+/// Noise (NNpsk0) layer that encrypts keystrokes on the LAN.
 pub mod secure;
 
-/// Kalıcı config: paylaşılan sır + peer host (env var + ~/.keyboard-it-ip yerine).
+/// Persistent config: shared secret + peer host.
 pub mod config;
 
-/// Mesaj türü. Tek bir u8 etiketi olarak kodlanır.
+/// Message type. Encoded as a single u8 tag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum MsgType {
@@ -30,10 +30,10 @@ impl MsgType {
     }
 }
 
-/// Sabit 5 baytlık tel kaydı. Yerleşim (big-endian = ağ sırası):
-///   [0]      mesaj türü (u8)
-///   [1..=2]  HID usage  (u16, USB HID Usage ID, Usage Page 0x07 — OS'tan bağımsız)
-///   [3..=4]  modifiers  (u16, bit maskesi: L/R Ctrl/Shift/Alt/GUI)
+/// Fixed 5-byte wire record. Layout (big-endian = network order):
+///   [0]      message type (u8)
+///   [1..=2]  HID usage  (u16, USB HID Usage ID, Usage Page 0x07 — OS-independent)
+///   [3..=4]  modifiers  (u16, bit mask: L/R Ctrl/Shift/Alt/GUI)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct KeyEvent {
     pub msg: MsgType,
@@ -41,7 +41,7 @@ pub struct KeyEvent {
     pub modifiers: u16,
 }
 
-/// Bir olayın tel üzerindeki sabit uzunluğu.
+/// Fixed length of one event on the wire.
 pub const WIRE_LEN: usize = 5;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,14 +52,14 @@ pub enum DecodeError {
 }
 
 impl KeyEvent {
-    /// Sabit 5 baytlık diziye kodla. Ayırma yok, serializer yok, deterministik genişlik.
+    /// Encode into a fixed 5-byte array. No allocation, no serializer, deterministic width.
     pub fn encode(&self) -> [u8; WIRE_LEN] {
         let u = self.hid_usage.to_be_bytes();
         let m = self.modifiers.to_be_bytes();
         [self.msg as u8, u[0], u[1], m[0], m[1]]
     }
 
-    /// `buf`'ın ilk tam 5 baytından çöz.
+    /// Decode from the first full 5 bytes of `buf`.
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < WIRE_LEN {
             return Err(DecodeError::ShortBuffer);
@@ -72,7 +72,7 @@ impl KeyEvent {
     }
 }
 
-/// Modifier bit maskesi (USB HID boot-keyboard modifier byte'ıyla eşleşir, u16'ya genişletildi).
+/// Modifier bit mask (matches the USB HID boot-keyboard modifier byte, widened to u16).
 pub mod modmask {
     pub const LEFT_CTRL: u16 = 1 << 0;
     pub const LEFT_SHIFT: u16 = 1 << 1;
@@ -84,9 +84,9 @@ pub mod modmask {
     pub const RIGHT_GUI: u16 = 1 << 7;
 }
 
-// ===== Birleşik giriş olayı: KeyEvent'i sarar + fare varyantları =====
+// ===== Unified input event: wraps KeyEvent + mouse variants =====
 
-/// Tel üzerindeki InputEvent varyantını belirleyen etiket baytı.
+/// Tag byte selecting the InputEvent variant on the wire.
 pub mod tag {
     pub const KEY: u8 = 0;
     pub const MOUSE_MOVE: u8 = 1;
@@ -94,28 +94,28 @@ pub mod tag {
     pub const SCROLL: u8 = 3;
 }
 
-/// Fare butonu kimliği (küçük tam sayı; tel ve her iki taraf için ortak).
+/// Mouse button id (small integer; shared by the wire and both sides).
 pub mod mousebtn {
     pub const LEFT: u8 = 0;
     pub const RIGHT: u8 = 1;
     pub const MIDDLE: u8 = 2;
 }
 
-/// Birleşik giriş olayı. Mevcut KeyEvent aynen sarılır; fare varyantları eklenir.
-/// Hareket RELATİFtir (delta): mutlak Mac koordinatları Windows'ta anlamsız.
+/// Unified input event. Wraps the existing KeyEvent unchanged; adds mouse variants.
+/// Motion is RELATIVE (deltas): absolute Mac coordinates are meaningless on Windows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputEvent {
     Key(KeyEvent),
     MouseMove { dx: i16, dy: i16 },
     MouseButton { button: u8, down: bool }, // button: mousebtn::*
-    Scroll { dx: i8, dy: i8 },              // dy: dikey, dx: yatay (tick sayısı)
+    Scroll { dx: i8, dy: i8 },              // dy: vertical, dx: horizontal (tick count)
 }
 
-/// En büyük olası kodlama: 1 etiket baytı + 5 baytlık Key payload'u.
+/// Largest possible encoding: 1 tag byte + 5-byte Key payload.
 pub const INPUT_MAX_LEN: usize = 1 + WIRE_LEN; // = 6
 
 impl InputEvent {
-    /// Sabit tampona kodla; (buf, kullanılan_uzunluk) döner. Heap yok.
+    /// Encode into a fixed buffer; returns (buf, used_len). No heap.
     pub fn encode(&self) -> ([u8; INPUT_MAX_LEN], usize) {
         let mut b = [0u8; INPUT_MAX_LEN];
         let len = match self {
@@ -138,7 +138,7 @@ impl InputEvent {
             }
             InputEvent::Scroll { dx, dy } => {
                 b[0] = tag::SCROLL;
-                b[1] = *dx as u8; // i8 -> u8 bit-koruyan
+                b[1] = *dx as u8; // i8 -> u8, bit-preserving
                 b[2] = *dy as u8;
                 3
             }
@@ -146,7 +146,7 @@ impl InputEvent {
         (b, len)
     }
 
-    /// İlk etiket baytından çöz; her varyant kendi uzunluğunu doğrular.
+    /// Decode from the leading tag byte; each variant validates its own length.
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         let (&t, rest) = buf.split_first().ok_or(DecodeError::ShortBuffer)?;
         match t {
@@ -183,15 +183,15 @@ impl InputEvent {
     }
 }
 
-/// mac-sender'ın bağlanacağı, win-receiver'ın dinleyeceği varsayılan TCP portu.
+/// Default TCP port: mac-sender connects to it, win-receiver listens on it.
 pub const DEFAULT_PORT: u16 = 5599;
 
 use std::io::{self, Read, Write};
 
 impl KeyEvent {
-    /// Olayı "4 baytlık big-endian uzunluk öneki + payload" olarak yaz (framed).
-    /// Framing sabit-5-bayt için şart değil ama ileride alanlar eklenirse tel formatı
-    /// kırılmadan büyüsün diye baştan koyuyoruz.
+    /// Write the event as "4-byte big-endian length prefix + payload" (framed).
+    /// Framing is not required for a fixed 5-byte record, but it lets the wire
+    /// format grow later without breaking if fields are added.
     pub fn write_framed<W: Write>(&self, w: &mut W) -> io::Result<()> {
         let payload = self.encode();
         w.write_all(&(payload.len() as u32).to_be_bytes())?;
@@ -199,19 +199,19 @@ impl KeyEvent {
         w.flush()
     }
 
-    /// Bir framed olayı oku (uzunluk öneki + payload). Bağlantı kapanırsa
-    /// `UnexpectedEof` döner — çağıran bunu "karşı taraf gitti" olarak yorumlar.
+    /// Read one framed event (length prefix + payload). Returns `UnexpectedEof`
+    /// when the connection closes — callers interpret that as "peer went away".
     pub fn read_framed<R: Read>(r: &mut R) -> io::Result<KeyEvent> {
         let mut len_buf = [0u8; 4];
         r.read_exact(&mut len_buf)?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len == 0 || len > 64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "geçersiz çerçeve boyu"));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid frame length"));
         }
         let mut payload = [0u8; 64];
         r.read_exact(&mut payload[..len])?;
         KeyEvent::decode(&payload[..len])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("çözme hatası: {:?}", e)))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("decode error: {:?}", e)))
     }
 }
 
@@ -264,7 +264,7 @@ mod tests {
         let e = KeyEvent { msg: MsgType::Up, hid_usage: 0x0B /* 'h' */, modifiers: 0 };
         let mut buf = Vec::new();
         e.write_framed(&mut buf).unwrap();
-        assert_eq!(buf.len(), 4 + WIRE_LEN); // uzunluk öneki + payload
+        assert_eq!(buf.len(), 4 + WIRE_LEN); // length prefix + payload
         let mut cur = Cursor::new(buf);
         assert_eq!(KeyEvent::read_framed(&mut cur).unwrap(), e);
     }

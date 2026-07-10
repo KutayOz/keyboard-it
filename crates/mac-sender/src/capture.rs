@@ -1,21 +1,20 @@
-//! macOS klavye yakalama + çift-tıklama-Fn toggle (M3).
+//! macOS keyboard capture + double-tap-Fn toggle (M3).
 //!
-//! Durum makinesi:
-//!   - PASİF (başlangıç): tuşlar Mac'te normal çalışır, Windows'a GÖNDERİLMEZ.
-//!   - AKTİF: her tuş HID'e çevrilip Windows'a gider VE Mac'te BASTIRILIR (Drop).
-//! Aç/kapa: Fn'e ~400 ms içinde iki kez basmak (çift-tıklama).
+//! State machine:
+//!   - INACTIVE (initial): keys work normally on the Mac and are NOT sent to Windows.
+//!   - ACTIVE: every key is translated to HID, sent to Windows, AND suppressed on the Mac (Drop).
+//! Toggle: press Fn twice within ~400 ms (double-tap).
 //!
-//! İZİNLER (ikisi de gerekli):
-//!   - Giriş İzleme (Input Monitoring): olayları görmek için.
-//!   - Erişilebilirlik (Accessibility): AKTİF iken tuşları bastırmak (Drop) için.
-//! İlk çalıştırmada ikisi de SİSTEMİN RESMİ istemleriyle istenir
-//! (request_permissions_official — preflight sayesinde izin varsa istem çıkmaz).
-//! ÖN KOŞUL: Sistem Ayarları > Klavye > "🌐/fn tuşuna basınca: Hiçbir şey yapma"
-//!   (yoksa macOS çift-Fn'i Dikte için yer ve toggle'ı yiyebilir).
+//! PERMISSIONS (both required):
+//!   - Input Monitoring: to observe events.
+//!   - Accessibility: to suppress keys (Drop) while ACTIVE.
+//! On first run both are requested through the system's OFFICIAL prompts
+//! (request_permissions_official — the preflight check skips the prompt when already granted).
+//! PREREQUISITE: System Settings > Keyboard > set "Press fn (globe) key to" to "Do Nothing"
+//!   (otherwise macOS may reserve double-Fn for Dictation and swallow the toggle).
 //!
-//! GÜVENLİK: AKTİF iken Mac klavyesi bastırıldığından, kilitlenirsen fare hâlâ
-//! çalışır — menüden  > Force Quit ile terminali kapatabilirsin. Çift-Fn ile de
-//! her zaman PASİF'e dönersin.
+//! SAFETY: while ACTIVE the Mac keyboard is suppressed; if you get stuck, the mouse still
+//! works —  menu > Force Quit. Double-tap Fn always returns to INACTIVE.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -43,34 +42,34 @@ use crate::keymap::mac_keycode_to_hid;
 use crate::menubar::{self, ConnStatus};
 use crate::net::connect_retry;
 
-const FN_KEYCODE: i64 = 0x3F; // kVK_Function (Fn / 🌐 Globe)
-const CAPSLOCK_KEYCODE: i64 = 0x39; // kVK_CapsLock — flagsChanged'de TOGGLE davranır
+const FN_KEYCODE: i64 = 0x3F; // kVK_Function (Fn / Globe)
+const CAPSLOCK_KEYCODE: i64 = 0x39; // kVK_CapsLock — acts as a TOGGLE in flagsChanged
 const DOUBLE_TAP: Duration = Duration::from_millis(400);
 
-// Sistem tap'i kapattığında (TapDisabledByTimeout/ByUserInput) callback içinden
-// yeniden açmak için ham FFI. core-graphics sarmalayıcısının enable()'ı tap
-// handle'ından çağrılır ama handle callback'e taşınamaz (CFMachPort: !Send,
-// CGEventTap::new ise Send closure ister); bu yüzden CFMachPortRef'i AtomicUsize
-// içinde taşıyıp burada elle çağırıyoruz. Callback zaten ana thread'de koşar.
+// Raw FFI to re-enable the tap from inside the callback when the system disables it
+// (TapDisabledByTimeout/ByUserInput). The core-graphics wrapper's enable() is called on
+// the tap handle, but the handle cannot move into the callback (CFMachPort is !Send and
+// CGEventTap::new wants a Send closure), so the CFMachPortRef is carried in an
+// AtomicUsize and the call is made manually here. The callback runs on the main thread.
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
 }
 
-// İlk çalıştırma izin akışı (macOS 10.15+): Preflight, Giriş İzleme iznini
-// İSTEMSİZ yoklar (varsa true). Request, Apple'ın RESMİ izin diyaloğunu gösterir
-// VE uygulamayı Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme listesine
-// otomatik ekler — kullanıcı uygulamayı elle aramak zorunda kalmaz.
+// First-run permission flow (macOS 10.15+): the preflight probes Input Monitoring
+// WITHOUT prompting (true when granted). The request shows Apple's OFFICIAL permission
+// dialog AND adds the app to System Settings > Privacy & Security > Input Monitoring
+// automatically — the user does not have to find the app by hand.
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGPreflightListenEventAccess() -> bool;
     fn CGRequestListenEventAccess() -> bool;
 }
 
-/// Erişilebilirlik (Accessibility) izni: kAXTrustedCheckOptionPrompt=true ile
-/// çağrıldığında izin YOKSA Apple'ın resmi sistem diyaloğu çıkar ve uygulama
-/// Erişilebilirlik listesine otomatik eklenir; izin ZATEN varsa hiçbir diyalog
-/// çıkmadan true döner.
+/// Accessibility permission: when called with kAXTrustedCheckOptionPrompt=true and the
+/// permission is MISSING, Apple's official system dialog appears and the app is added
+/// to the Accessibility list automatically; when ALREADY granted it returns true with
+/// no dialog at all.
 fn ax_trusted_with_prompt() -> bool {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -83,7 +82,7 @@ fn ax_trusted_with_prompt() -> bool {
         fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
     }
     unsafe {
-        // Get-rule: sistem sabitinin sahipliği bizde değil, retain edilir.
+        // Get rule: we do not own the system constant, so it is retained.
         let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
         let opts = CFDictionary::from_CFType_pairs(&[(
             key.as_CFType(),
@@ -93,13 +92,13 @@ fn ax_trusted_with_prompt() -> bool {
     }
 }
 
-/// İzinleri sistemin RESMİ istemleriyle iste (tap kurulmadan ÖNCE çağrılır).
-/// İki istemi AYNI ANDA patlatmamak için sıralama:
-///   - Giriş İzleme yoksa: yalnız onu iste (Apple diyaloğu). Erişilebilirlik
-///     istemi bir SONRAKİ açılışa kalır — izin sonrası uygulamayı yeniden açmak
-///     zaten gerekiyor (CGEventTap izni süreç başında değerlendirir).
-///   - Giriş İzleme varsa: Erişilebilirlik eksikse onun resmi istemini göster.
-/// İki izin de ZATEN verilmişse hiçbir diyalog çıkmaz (preflight bunun için).
+/// Request permissions via the system's OFFICIAL prompts (called BEFORE the tap is
+/// created). Ordering avoids firing both prompts at once:
+///   - Input Monitoring missing: request only that (Apple dialog). The Accessibility
+///     prompt waits for the NEXT launch — a relaunch is required after granting anyway
+///     (CGEventTap evaluates the permission at process start).
+///   - Input Monitoring granted: show the official Accessibility prompt if missing.
+/// When both are ALREADY granted no dialog appears (that is what the preflight is for).
 fn request_permissions_official() {
     let listen_ok = unsafe { CGPreflightListenEventAccess() };
     if !listen_ok {
@@ -109,20 +108,20 @@ fn request_permissions_official() {
     let _ = ax_trusted_with_prompt();
 }
 
-/// Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme bölmesini doğrudan aç
-/// ('İzin gerekli' diyaloğundaki 'Ayarları Aç' butonu için).
+/// Open the System Settings > Privacy & Security > Input Monitoring pane directly
+/// (for the 'Open Settings' button in the 'Permission needed' dialog).
 fn open_input_monitoring_settings() {
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
         .spawn();
 }
 
-/// Kanal kapasitesi: bağlantı kopukken callback'ten gelen olaylar bu sınırın
-/// üstünde ATILIR (try_send). Reconnect sonrası bayat tuş seli olmasın diye
-/// gönderim thread'i bağlantı kurulunca kuyruğu ayrıca boşaltır (bulgu düzeltmesi).
+/// Channel capacity: while disconnected, callback events above this limit are DROPPED
+/// (try_send). The send thread also drains the queue once the connection is up, so a
+/// reconnect does not replay a flood of stale keys.
 const EVENT_QUEUE_CAP: usize = 128;
 
-/// Bir modifier keycode'un down/up durumunu belirleyen CGEventFlags maskesi.
+/// CGEventFlags mask that determines the down/up state of a modifier keycode.
 fn modifier_mask(kc: i64) -> Option<CGEventFlags> {
     let m = match kc {
         0x37 | 0x36 => CGEventFlags::CGEventFlagCommand,
@@ -139,18 +138,19 @@ struct State {
     active: bool,
     fn_down: bool,
     last_fn_press: Option<Instant>,
-    held: HashSet<u16>, // AKTİF iken Windows'a Down gönderilmiş HID usage'lar
+    held: HashSet<u16>, // HID usages sent Down to Windows while ACTIVE
 }
 
-/// Mac imlecini fiziksel fareden AYIR/BAĞLA. `captured=true` iken imleç DONAR
-/// (WindowServer artık fiziksel fareyle imleci hareket ettirmez) ama CGEventTap
-/// hâlâ delta'ları görür — event Drop'lamak imleci durdurmadığından bu gerekli.
-/// Kenar-clamp de kalkar, yani ekran kenarında bile delta akar. PASİF'te geri bağlanır.
+/// Detach/attach the Mac cursor from the physical mouse. With `captured=true` the cursor
+/// FREEZES (WindowServer stops moving it for physical mouse input) but the CGEventTap
+/// still sees deltas — needed because dropping the event does not stop the cursor.
+/// Edge clamping is lifted too, so deltas keep flowing even at screen edges. Re-attached
+/// when INACTIVE.
 #[cfg(target_os = "macos")]
 fn set_mouse_captured(captured: bool) {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
-        // boolean_t (= int): connected=1 normal (bağlı), 0 = ayrık (imleç donar).
+        // boolean_t (= int): connected=1 normal (attached), 0 = detached (cursor freezes).
         fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
     }
     unsafe {
@@ -158,22 +158,22 @@ fn set_mouse_captured(captured: bool) {
     }
 }
 
-/// Sender-tarafı ilk kurulum tamam mı? (Anahtar config'te ya da env'de VE peer_host dolu.)
+/// Is sender-side first-run setup complete? (Key in config or env AND peer_host set.)
 fn config_ready(cfg: &protocol::config::Config) -> bool {
     protocol::secure::psk_from_config_or_env(cfg).is_ok() && !cfg.peer_host.is_empty()
 }
 
 pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
-    // ÖNCE menü çubuğu + event tap (ana thread), bağlantı ARKA planda: Windows
-    // kapalıyken/config boşken uygulama artık sessizce ölmez (bulgu düzeltmesi).
+    // Menu bar + event tap FIRST (main thread), connection in the BACKGROUND: the app
+    // must not die silently when Windows is off or the config is empty.
     let mtm = MainThreadMarker::new()
-        .expect("run() ana thread'de çağrılmalı (AppKit ana thread ister)");
+        .expect("run() must be called on the main thread (AppKit requires it)");
     let initial_conn =
         if config_ready(&cfg) { ConnStatus::Connecting } else { ConnStatus::ConfigNeeded };
     let menu_bar = menubar::setup(mtm, false, initial_conn);
 
-    // Durum bayrakları: tap callback + bağlantı thread'i (Send olmalı) buraya yazar;
-    // ana-thread timer okuyup menü çubuğu başlığını günceller (objc2 nesneleri !Send).
+    // State flags: the tap callback and the connection thread (must be Send) write here;
+    // a main-thread timer reads them and updates the menu bar title (objc2 objects are !Send).
     let active_flag = Arc::new(AtomicBool::new(false));
     let conn_status = Arc::new(AtomicU8::new(initial_conn as u8));
     let permission_needed = Arc::new(AtomicBool::new(false));
@@ -186,25 +186,25 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     );
     let flag_cb = active_flag.clone();
 
-    println!("Durum: PASİF. Aç/kapa için Fn'e çift bas.");
-    println!("(İzin: Giriş İzleme + Erişilebilirlik. Ön koşul: fn tuşu 'Hiçbir şey yapma'.)");
-    println!("(Çıkış: Ctrl-C — ya da kilitlenirsen fareyle  > Force Quit.)");
+    println!("State: INACTIVE. Double-tap Fn to toggle.");
+    println!("(Permissions: Input Monitoring + Accessibility. Prerequisite: fn key set to 'Do Nothing'.)");
+    println!("(Quit: Ctrl-C — or  > Force Quit with the mouse if stuck.)");
 
-    // Callback hafif kalsın: olayları SINIRLI kanala koy (try_send — dolarsa at);
-    // ayrı thread TCP'ye framed yazar. Sınırsız kuyruk, kopuklukta biriken bayat
-    // olayların reconnect'te sel gibi boşalmasına yol açıyordu (bulgu düzeltmesi).
+    // Keep the callback light: push events into a BOUNDED channel (try_send — drop when
+    // full); a separate thread writes them framed to TCP. An unbounded queue let stale
+    // events pile up during an outage and flood the peer on reconnect.
     let (tx, rx) = mpsc::sync_channel::<InputEvent>(EVENT_QUEUE_CAP);
     let conn_bg = conn_status.clone();
     thread::spawn(move || loop {
-        // Config'i HER denemede taze oku: 'Ayarlar...' ile değişen adres/anahtar
-        // yeniden başlatma gerektirmeden bir sonraki denemede geçerli olur
-        // (bulgu düzeltmesi). Bozuk/eksik dosya = 'Ayar gerekli'.
+        // Re-read the config on EVERY attempt: an address/key changed via 'Settings...'
+        // takes effect on the next attempt without a restart. Broken/missing file =
+        // 'Setup needed'.
         let cfg = protocol::config::Config::load().ok().flatten().unwrap_or_default();
         let psk = match protocol::secure::psk_from_config_or_env(&cfg) {
             Ok(p) if !cfg.peer_host.is_empty() => p,
             _ => {
                 conn_bg.store(ConnStatus::ConfigNeeded as u8, Ordering::Relaxed);
-                for _ in rx.try_iter() {} // bağlantı yokken olayları at
+                for _ in rx.try_iter() {} // drop events while disconnected
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -214,7 +214,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         let mut stream = match connect_retry(&addr) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("bağlanılamadı ({addr}): {e} — tekrar denenecek.");
+                eprintln!("connect failed ({addr}): {e} — will retry.");
                 conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
                 for _ in rx.try_iter() {}
                 thread::sleep(Duration::from_secs(1));
@@ -224,46 +224,46 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         let mut transport = match protocol::secure::handshake_initiator(&mut stream, &psk) {
             Ok(t) => t,
             Err(e) => {
-                // secure.rs yanlış anahtarı 'karşı taraf el sıkışmayı reddetti —
-                // eşleşme anahtarları iki tarafta AYNI mı?' metniyle ayırt eder.
-                eprintln!("el sıkışma başarısız: {e}");
+                // secure.rs reports a wrong key as the peer rejecting the handshake and
+                // asks whether the pairing key matches on both sides.
+                eprintln!("handshake failed: {e}");
                 conn_bg.store(ConnStatus::HandshakeFailed as u8, Ordering::Relaxed);
                 for _ in rx.try_iter() {}
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
-        println!("bağlandı (şifreli, Noise NNpsk0): {addr}");
+        println!("connected (encrypted, Noise NNpsk0): {addr}");
         conn_bg.store(ConnStatus::Connected as u8, Ordering::Relaxed);
-        // Kopukluk boyunca birikenler bayat — göndermeden önce kuyruğu boşalt.
+        // Anything queued during the outage is stale — drain before sending.
         for _ in rx.try_iter() {}
-        // Gönderim döngüsü — bağlantı kopana kadar.
+        // Send loop — until the connection drops.
         loop {
             match rx.recv() {
                 Ok(ev) => {
                     if protocol::secure::send_event(&mut transport, &mut stream, &ev).is_err() {
-                        eprintln!("bağlantı koptu — yeniden bağlanılıyor...");
+                        eprintln!("connection lost — reconnecting...");
                         conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
-                        break; // dış döngü yeniden bağlanır
+                        break; // outer loop reconnects
                     }
                 }
-                Err(_) => return, // ana thread gitti (kanal kapandı)
+                Err(_) => return, // main thread gone (channel closed)
             }
         }
     });
 
-    // İlk açılış: config boşsa kullanıcıya GÖRÜNÜR yönerge (LSUIElement .app'te
-    // stderr görünmez; eskiden sessizce çıkılıyordu — bulgu düzeltmesi).
+    // First launch with an empty config: show VISIBLE instructions (stderr is invisible
+    // in an LSUIElement .app).
     if initial_conn == ConnStatus::ConfigNeeded {
         let open = menubar::show_setup_alert(
             mtm,
-            "keyboard-it — ilk kurulum",
-            "Ayar dosyası henüz doldurulmamış.\n\n\
-             config.toml içinde şunları doldur:\n\
-             \u{2022} shared_secret: eşleşme anahtarı (Windows'takiyle AYNI)\n\
-             \u{2022} peer_host: Windows PC'nin IP adresi\n\n\
-             Dosyaya menü çubuğundaki keyboard-it simgesi \u{2192} 'Ayarlar...' ile de ulaşabilirsin.\n\
-             Kaydettikten sonra uygulama kendiliğinden bağlanır (yeniden başlatma gerekmez).",
+            "keyboard-it — first-run setup",
+            "The config file has not been filled in yet.\n\n\
+             In config.toml, set:\n\
+             \u{2022} shared_secret: the pairing key (identical to the one on Windows)\n\
+             \u{2022} peer_host: the Windows PC's IP address\n\n\
+             You can also reach the file via the keyboard-it menu bar icon \u{2192} 'Settings...'.\n\
+             Once saved, the app connects on its own (no restart needed).",
         );
         if open {
             let _ = protocol::config::Config::edit();
@@ -277,44 +277,44 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         held: HashSet::new(),
     });
 
-    // İlk çalıştırma: tap kurulmadan ÖNCE izinleri sistemin resmi istemleriyle
-    // yokla/iste — izin zaten varsa hiçbir diyalog çıkmaz, yoksa Apple'ın kendi
-    // diyaloğu çıkar ve uygulama ilgili izin listesine otomatik eklenir.
+    // First run: probe/request permissions via the official system prompts BEFORE the
+    // tap is created — no dialog appears when already granted; otherwise Apple's own
+    // dialog shows and adds the app to the relevant permission list.
     request_permissions_official();
 
-    // Tap'in mach portu: callback TapDisabled* görünce CGEventTapEnable ile tap'i
-    // YENİDEN açar (eskiden sadece stderr'e yazılıyor, toggle ölü kalıyordu —
-    // bulgu düzeltmesi). Tap oluştuktan SONRA doldurulur (0 = henüz yok).
+    // The tap's mach port: when the callback sees TapDisabled* it re-enables the tap via
+    // CGEventTapEnable — without this the toggle dies silently and the app becomes
+    // unusable. Filled in AFTER the tap is created (0 = not yet).
     let tap_port = Arc::new(AtomicUsize::new(0));
     let tap_port_cb = tap_port.clone();
 
     let tap = CGEventTap::new(
         CGEventTapLocation::HID,
         CGEventTapPlacement::HeadInsertEventTap,
-        // AKTİF tap: callback'ten Drop dönerek tuşu yutabiliriz (Accessibility gerekir).
+        // ACTIVE tap: returning Drop from the callback swallows the key (needs Accessibility).
         CGEventTapOptions::Default,
         vec![
             CGEventType::KeyDown,
             CGEventType::KeyUp,
             CGEventType::FlagsChanged,
-            // fare: hareket (düz + buton basılıyken drag)
+            // mouse: movement (plain + dragging with a button held)
             CGEventType::MouseMoved,
             CGEventType::LeftMouseDragged,
             CGEventType::RightMouseDragged,
             CGEventType::OtherMouseDragged,
-            // fare: butonlar
+            // mouse: buttons
             CGEventType::LeftMouseDown,
             CGEventType::LeftMouseUp,
             CGEventType::RightMouseDown,
             CGEventType::RightMouseUp,
             CGEventType::OtherMouseDown,
             CGEventType::OtherMouseUp,
-            // fare: scroll
+            // mouse: scroll
             CGEventType::ScrollWheel,
         ],
         move |_proxy, event_type, event: &CGEvent| -> CallbackResult {
-            // Sistem tap'i devre dışı bıraktıysa (timeout/user-input) hemen geri aç:
-            // yoksa çift-Fn toggle sessizce ölür ve uygulama işlevsiz kalır.
+            // If the system disabled the tap (timeout/user input), re-enable at once:
+            // otherwise the double-Fn toggle dies silently and the app is unusable.
             if matches!(
                 event_type,
                 CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
@@ -322,9 +322,9 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                 let port = tap_port_cb.load(Ordering::Relaxed);
                 if port != 0 {
                     unsafe { CGEventTapEnable(port as *mut std::ffi::c_void, true) };
-                    eprintln!("uyarı: event tap devre dışı kalmıştı ({event_type:?}) — yeniden etkinleştirildi.");
+                    eprintln!("warning: event tap had been disabled ({event_type:?}) — re-enabled.");
                 } else {
-                    eprintln!("uyarı: event tap devre dışı ({event_type:?}).");
+                    eprintln!("warning: event tap disabled ({event_type:?}).");
                 }
                 return CallbackResult::Keep;
             }
@@ -332,21 +332,21 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             let kc = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
             let mut st = state.borrow_mut();
 
-            // --- Fn tuşu: çift-tıklama toggle algılama (durumdan bağımsız her zaman) ---
+            // --- Fn key: double-tap toggle detection (always, regardless of state) ---
             if kc == FN_KEYCODE {
                 let now_down = event.get_flags().contains(CGEventFlags::CGEventFlagSecondaryFn);
                 if now_down && !st.fn_down {
-                    // rising edge = bir "tık"
+                    // rising edge = one "tap"
                     let is_double = matches!(st.last_fn_press, Some(t) if t.elapsed() <= DOUBLE_TAP);
                     if is_double {
                         st.last_fn_press = None;
                         st.active = !st.active;
                         if st.active {
-                            set_mouse_captured(true); // Mac imlecini dondur
-                            println!(">>> AKTİF — klavye+fare Windows'a gidiyor (Mac'te bastırılıyor).");
+                            set_mouse_captured(true); // freeze the Mac cursor
+                            println!(">>> ACTIVE — keyboard+mouse go to Windows (suppressed on the Mac).");
                         } else {
-                            set_mouse_captured(false); // Mac imlecini geri bağla
-                            // PASİF'e dönüş: Windows'ta basılı kalan tuşları serbest bırak.
+                            set_mouse_captured(false); // re-attach the Mac cursor
+                            // Returning to INACTIVE: release keys still held down on Windows.
                             let held: Vec<u16> = st.held.drain().collect();
                             for hid in held {
                                 let _ = tx.try_send(InputEvent::Key(KeyEvent {
@@ -355,25 +355,26 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                                     modifiers: 0,
                                 }));
                             }
-                            println!("<<< PASİF — klavye+fare tekrar Mac'te.");
+                            println!("<<< INACTIVE — keyboard+mouse back on the Mac.");
                         }
-                        // Durum bayrağını güncelle; menü çubuğunu ana-thread timer yansıtır.
+                        // Update the state flag; the main-thread timer reflects it in the menu bar.
                         flag_cb.store(st.active, Ordering::Relaxed);
                     } else {
                         st.last_fn_press = Some(Instant::now());
                     }
                 }
                 st.fn_down = now_down;
-                // Fn'in kendisi Windows'a gitmez (HID yok). AKTİF iken tüket, PASİF iken geçir.
+                // Fn itself never goes to Windows (no HID usage). Consume while ACTIVE,
+                // pass through while INACTIVE.
                 return if st.active { CallbackResult::Drop } else { CallbackResult::Keep };
             }
 
-            // --- PASİF: Mac normal çalışsın, gönderme, bastırma ---
+            // --- INACTIVE: let the Mac work normally; do not send, do not suppress ---
             if !st.active {
                 return CallbackResult::Keep;
             }
 
-            // --- AKTİF: çevir + gönder + bastır ---
+            // --- ACTIVE: translate + send + suppress ---
             match event_type {
                 CGEventType::KeyDown => {
                     let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT);
@@ -392,11 +393,11 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                 }
                 CGEventType::FlagsChanged => {
                     if kc == CAPSLOCK_KEYCODE {
-                        // CapsLock: macOS flagsChanged'de AlphaShift bayrağı fiziksel
-                        // down/up değil TOGGLE'dır — bayrağı Down/Up'a çevirmek iki
-                        // tarafı desenkronize ediyordu. Her değişimde tek Down+Up
-                        // çifti gönder: Windows'ta da tam bir kez toggle olur
-                        // (bulgu düzeltmesi). held'e girmez (anında bırakılıyor).
+                        // CapsLock: in flagsChanged the AlphaShift flag is a TOGGLE, not a
+                        // physical down/up — mapping the flag to Down/Up desynchronized
+                        // the two sides. Send one Down+Up pair per change instead:
+                        // Windows toggles exactly once. Not tracked in `held` (released
+                        // immediately).
                         if let Some(hid) = mac_keycode_to_hid(kc) {
                             let _ = tx.try_send(InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }));
                             let _ = tx.try_send(InputEvent::Key(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }));
@@ -413,7 +414,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     }
                 }
 
-                // --- fare: RELATİF hareket (delta yalnızca move/drag'de anlamlı) ---
+                // --- mouse: RELATIVE movement (deltas are only meaningful for move/drag) ---
                 CGEventType::MouseMoved
                 | CGEventType::LeftMouseDragged
                 | CGEventType::RightMouseDragged
@@ -427,7 +428,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     }
                 }
 
-                // --- fare: sol/sağ butonlar (kendi olay tipleri) ---
+                // --- mouse: left/right buttons (dedicated event types) ---
                 CGEventType::LeftMouseDown => {
                     let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::LEFT, down: true });
                 }
@@ -441,7 +442,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::RIGHT, down: false });
                 }
 
-                // --- fare: diğer butonlar (orta = numara 2; ekstralar şimdilik atlanır) ---
+                // --- mouse: other buttons (middle = number 2; extras skipped for now) ---
                 CGEventType::OtherMouseDown | CGEventType::OtherMouseUp => {
                     let num = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
                     let down = matches!(event_type, CGEventType::OtherMouseDown);
@@ -450,7 +451,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     }
                 }
 
-                // --- fare: scroll. Axis1=dikey, Axis2=yatay (tam-sayı tick). ---
+                // --- mouse: scroll. Axis1=vertical, Axis2=horizontal (integer ticks). ---
                 CGEventType::ScrollWheel => {
                     let v = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
                     let h = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
@@ -463,53 +464,53 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
 
                 _ => {}
             }
-            CallbackResult::Drop // AKTİF iken tüm klavye+fare olaylarını Mac'ten bastır
+            CallbackResult::Drop // while ACTIVE, suppress all keyboard+mouse events on the Mac
         },
     );
 
-    // Tap kurulamazsa (tipik neden: Giriş İzleme/Erişilebilirlik izni yok) ÇIKMA:
-    // .app LSUIElement olduğundan stderr görünmezdi ve uygulama sessizce ölüyordu.
-    // Bunun yerine görünür bir diyalog göster; uygulama menü çubuğunda 'İzin
-    // gerekli' başlığıyla açık kalır (Ayarlar/Çıkış çalışmaya devam eder) —
-    // bulgu düzeltmesi.
+    // If the tap cannot be created (typical cause: missing Input Monitoring or
+    // Accessibility permission), do NOT exit: the .app is LSUIElement, so stderr is
+    // invisible and a silent exit looks like the app never launched. Show a visible
+    // dialog instead; the app stays open with a 'Permission needed' menu bar title
+    // (Settings/Quit keep working).
     let _tap = match tap {
         Ok(tap) => match tap.mach_port().create_runloop_source(0) {
             Ok(source) => {
                 unsafe {
                     CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
                 }
-                // Portu callback'in erişeceği yuvaya koy (TapDisabled* kurtarması).
+                // Hand the port to the callback (TapDisabled* recovery).
                 tap_port.store(tap.mach_port().as_concrete_TypeRef() as usize, Ordering::Relaxed);
                 tap.enable();
-                println!("hazır. Fn'e çift bas → AKTİF; tekrar çift bas → PASİF. (Menü çubuğu: Cikis ile çık)");
+                println!("ready. Double-tap Fn → ACTIVE; double-tap again → INACTIVE. (Quit via the menu bar.)");
                 Some(tap)
             }
             Err(_) => {
                 permission_needed.store(true, Ordering::Relaxed);
                 menubar::show_alert(
                     mtm,
-                    "keyboard-it — hata",
-                    "Klavye yakalama başlatılamadı (run loop source oluşturulamadı).\n\
-                     Uygulamayı kapatıp yeniden açmayı dene.",
+                    "keyboard-it — error",
+                    "Keyboard capture could not start (failed to create the run loop source).\n\
+                     Try quitting and reopening the app.",
                 );
                 None
             }
         },
         Err(_) => {
             permission_needed.store(true, Ordering::Relaxed);
-            // İzin az önce resmi istemle verilmiş olsa bile CGEventTap için
-            // uygulamanın YENİDEN AÇILMASI gerekir — metin bunu söylüyor.
-            // 'Ayarları Aç' doğru bölmeyi (Giriş İzleme) doğrudan açar.
+            // Even when the permission was granted through the prompt moments ago,
+            // CGEventTap requires the app to be RELAUNCHED — the text says so.
+            // 'Open Settings' opens the Input Monitoring pane directly.
             let open = menubar::show_setup_alert(
                 mtm,
-                "keyboard-it — izin gerekli",
-                "Klavye yakalama başlatılamadı — izin eksik.\n\n\
-                 Az önce çıkan sistem isteminde izin verdiysen: macOS bu iznin\n\
-                 etkinleşmesi için uygulamanın kapatılıp YENİDEN AÇILMASINI ister.\n\n\
-                 İstem çıkmadıysa: Sistem Ayarları \u{2192} Gizlilik ve Güvenlik \u{2192}\n\
-                 Giriş İzleme (ve Erişilebilirlik) bölümünde keyboard-it'i AÇIK\n\
-                 konuma getir, sonra uygulamayı yeniden başlat.\n\n\
-                 Uygulama menü çubuğunda 'İzin gerekli' olarak açık kalacak.",
+                "keyboard-it — permission needed",
+                "Keyboard capture could not start — a permission is missing.\n\n\
+                 If you granted the permission in the system prompt that appeared:\n\
+                 macOS requires the app to be quit and REOPENED for it to take effect.\n\n\
+                 If no prompt appeared: enable keyboard-it under System Settings \u{2192}\n\
+                 Privacy & Security \u{2192} Input Monitoring (and Accessibility),\n\
+                 then restart the app.\n\n\
+                 The app will stay in the menu bar as 'Permission needed'.",
             );
             if open {
                 open_input_monitoring_settings();
@@ -518,12 +519,12 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         }
     };
 
-    // Tap source'u ana run-loop'a EKLEDİKTEN sonra AppKit'i çalıştır. app.run()
-    // aynı ana-thread CFRunLoop'unu sürer; source kCFRunLoopCommonModes'ta olduğundan
-    // tap NSApp altında da tetiklenir.
+    // Run AppKit AFTER the tap source is added to the main run loop. app.run() drives
+    // the same main-thread CFRunLoop; the source is in kCFRunLoopCommonModes, so the tap
+    // also fires under NSApp.
     let app = NSApplication::sharedApplication(mtm);
     app.run();
 
-    drop(menu_bar); // tutamaç canlılığı için buraya kadar taşı
+    drop(menu_bar); // keep the handles alive up to this point
     Ok(())
 }

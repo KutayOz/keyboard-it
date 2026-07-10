@@ -3,10 +3,10 @@ name = "protocol"
 version.workspace = true
 edition = "2021"
 
-# İki binary'nin paylaştığı "köprü" + LAN şifreleme katmanı.
+# The "bridge" shared by both binaries + the LAN encryption layer.
 [dependencies]
-snow = "0.10"   # Noise protokolü; default feature'lar 25519 + ChaChaPoly + BLAKE2s
-blake2 = "0.10" # parolayı 32 baytlık PSK'ye sıkıştırmak için (BLAKE2s-256)
-directories = "6" # OS-standart config dizini
+snow = "0.10"   # Noise protocol; default features are 25519 + ChaChaPoly + BLAKE2s
+blake2 = "0.10" # compresses the passphrase into a 32-byte PSK (BLAKE2s-256)
+directories = "6" # OS-standard config dir
 serde = { version = "1", features = ["derive"] }
 toml = "1"

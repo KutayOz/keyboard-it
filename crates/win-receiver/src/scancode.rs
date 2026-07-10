@@ -1,14 +1,14 @@
-//! USB HID Usage (Usage Page 0x07) -> PS/2 Set-1 make scancode eşlemesi.
+//! USB HID Usage (Usage Page 0x07) -> PS/2 Set-1 make scancode mapping.
 //!
-//! Dönen `bool` = "extended" (0xE0 önekli) tuş mu; SendInput'ta bu tuşlar için
-//! KEYEVENTF_EXTENDEDKEY gerekir (oklar, sağ Ctrl/Alt, navigasyon bloğu, Win tuşları).
-//! Kaynak: Microsoft "HID to PS/2 Scan Code Translation Table". Eksik tuş çıkarsa
-//! buraya bir satır eklemek yeterli.
+//! The returned `bool` = whether the key is "extended" (0xE0-prefixed); SendInput needs
+//! KEYEVENTF_EXTENDEDKEY for these (arrows, right Ctrl/Alt, navigation block, Win keys).
+//! Source: Microsoft "HID to PS/2 Scan Code Translation Table". If a key turns out to be
+//! missing, adding a row here is enough.
 
-/// `None` = bu HID usage için henüz eşleme yok.
+/// `None` = no mapping for this HID usage yet.
 pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
     let v = match hid {
-        // --- Harfler a-z (0x04..=0x1D) ---
+        // --- Letters a-z (0x04..=0x1D) ---
         0x04 => (0x1E, false), // a
         0x05 => (0x30, false), // b
         0x06 => (0x2E, false), // c
@@ -36,7 +36,7 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0x1C => (0x15, false), // y
         0x1D => (0x2C, false), // z
 
-        // --- Rakamlar 1-0 (0x1E..=0x27) ---
+        // --- Digits 1-0 (0x1E..=0x27) ---
         0x1E => (0x02, false), // 1
         0x1F => (0x03, false), // 2
         0x20 => (0x04, false), // 3
@@ -48,7 +48,7 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0x26 => (0x0A, false), // 9
         0x27 => (0x0B, false), // 0
 
-        // --- Kontrol / noktalama ---
+        // --- Control / punctuation ---
         0x28 => (0x1C, false), // Enter
         0x29 => (0x01, false), // Esc
         0x2A => (0x0E, false), // Backspace
@@ -67,7 +67,7 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0x38 => (0x35, false), // /
         0x39 => (0x3A, false), // CapsLock
 
-        // --- Navigasyon (extended) ---
+        // --- Navigation (extended) ---
         0x49 => (0x52, true), // Insert
         0x4A => (0x47, true), // Home
         0x4B => (0x49, true), // PageUp
@@ -79,7 +79,7 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0x51 => (0x50, true), // ArrowDown
         0x52 => (0x48, true), // ArrowUp
 
-        // --- Modifierlar (0xE0..=0xE7) ---
+        // --- Modifiers (0xE0..=0xE7) ---
         0xE0 => (0x1D, false), // LeftCtrl
         0xE1 => (0x2A, false), // LeftShift
         0xE2 => (0x38, false), // LeftAlt
@@ -89,10 +89,10 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0xE6 => (0x38, true),  // RightAlt (AltGr)
         0xE7 => (0x5C, true),  // RightGUI (Win)
 
-        // --- ISO tuşu (Türkçe/ISO: <>| ) ---
+        // --- ISO key (Turkish/ISO layouts: <>| ) ---
         0x64 => (0x56, false), // HID Non-US backslash -> Set-1 make 0x56 (Europe 2)
 
-        // --- Fonksiyon tuşları F1-F12 ---
+        // --- Function keys F1-F12 ---
         0x3A => (0x3B, false), // F1
         0x3B => (0x3C, false), // F2
         0x3C => (0x3D, false), // F3
@@ -103,8 +103,8 @@ pub fn hid_to_scancode(hid: u16) -> Option<(u16, bool)> {
         0x41 => (0x42, false), // F8
         0x42 => (0x43, false), // F9
         0x43 => (0x44, false), // F10
-        0x44 => (0x57, false), // F11 (dizi kırılır: 0x45 DEĞİL)
-        0x45 => (0x58, false), // F12 (dizi kırılır: 0x46 DEĞİL)
+        0x44 => (0x57, false), // F11 (breaks the sequence: NOT 0x45)
+        0x45 => (0x58, false), // F12 (breaks the sequence: NOT 0x46)
 
         _ => return None,
     };
@@ -120,6 +120,6 @@ mod tests {
         assert_eq!(hid_to_scancode(0x0B), Some((0x23, false))); // h
         assert_eq!(hid_to_scancode(0x12), Some((0x18, false))); // o
         assert_eq!(hid_to_scancode(0x4F), Some((0x4D, true)));  // ArrowRight (extended)
-        assert_eq!(hid_to_scancode(0x00), None);                // eşleme yok
+        assert_eq!(hid_to_scancode(0x00), None);                // no mapping
     }
 }

@@ -1,12 +1,12 @@
-//! macOS sanal keycode (kVK_*) -> USB HID Usage (Usage Page 0x07) eşlemesi.
+//! macOS virtual keycode (kVK_*) -> USB HID Usage (Usage Page 0x07) mapping.
 //!
-//! Konum-tabanlı: keycode fiziksel tuş konumunu adresler, HID usage da öyle. Böylece
-//! Windows tarafı kendi düzenini uygular (bkz. win-receiver/scancode.rs). Fn tuşu (0x3F)
-//! standart bir HID usage'a sahip DEĞİLDİR — `None` döner, M3'te toggle için ayrı ele alınır.
+//! Position-based: keycodes address physical key positions and so do HID usages, so the
+//! Windows side applies its own layout (see win-receiver/scancode.rs). The Fn key (0x3F)
+//! has no standard HID usage — returns `None`; M3 handles it separately for the toggle.
 
 pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
     let v: u16 = match kc {
-        // Harfler
+        // Letters
         0x00 => 0x04, // A
         0x0B => 0x05, // B
         0x08 => 0x06, // C
@@ -34,7 +34,7 @@ pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
         0x10 => 0x1C, // Y
         0x06 => 0x1D, // Z
 
-        // Rakamlar (üst sıra)
+        // Digits (top row)
         0x12 => 0x1E, // 1
         0x13 => 0x1F, // 2
         0x14 => 0x20, // 3
@@ -46,7 +46,7 @@ pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
         0x19 => 0x26, // 9
         0x1D => 0x27, // 0
 
-        // Kontrol / noktalama
+        // Control / punctuation
         0x24 => 0x28, // Return
         0x35 => 0x29, // Escape
         0x33 => 0x2A, // Delete (Backspace)
@@ -65,7 +65,7 @@ pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
         0x2C => 0x38, // /
         0x39 => 0x39, // CapsLock
 
-        // Navigasyon
+        // Navigation
         0x72 => 0x49, // Help/Insert
         0x73 => 0x4A, // Home
         0x74 => 0x4B, // PageUp
@@ -77,10 +77,10 @@ pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
         0x7D => 0x51, // ArrowDown
         0x7E => 0x52, // ArrowUp
 
-        // ISO ek tuşu (Türkçe/ISO MacBook: Sol Shift ile Z arasındaki <>| tuşu)
+        // ISO extra key (Turkish/ISO MacBook: the <>| key between Left Shift and Z)
         0x0A => 0x64, // kVK_ISO_Section -> HID Non-US backslash and pipe
 
-        // Fonksiyon tuşları F1-F12 (macOS keycode'ları ardışık DEĞİL)
+        // Function keys F1-F12 (macOS keycodes are not consecutive)
         0x7A => 0x3A, // F1
         0x78 => 0x3B, // F2
         0x63 => 0x3C, // F3
@@ -88,19 +88,19 @@ pub fn mac_keycode_to_hid(kc: i64) -> Option<u16> {
         0x60 => 0x3E, // F5
         0x61 => 0x3F, // F6
         0x62 => 0x40, // F7
-        0x64 => 0x41, // F8  (mac keycode 0x64 = F8; ISO tuşu keycode 0x0A'dır, 0x64 değil)
+        0x64 => 0x41, // F8  (mac keycode 0x64 = F8; the ISO key is keycode 0x0A, not 0x64)
         0x65 => 0x42, // F9
         0x6D => 0x43, // F10
         0x67 => 0x44, // F11
         0x6F => 0x45, // F12
 
-        // Modifierlar — Cmd<->Ctrl TAKAS (kullanıcı tercihi: Cmd+C => Windows'ta Ctrl+C)
-        0x37 => 0xE0, // LeftCommand  -> Windows LeftControl  (eskiden 0xE3)
-        0x3B => 0xE3, // LeftControl  -> Windows LeftGUI/Win  (eskiden 0xE0)
+        // Modifiers — Cmd<->Ctrl SWAPPED (user preference: Cmd+C => Ctrl+C on Windows)
+        0x37 => 0xE0, // LeftCommand  -> Windows LeftControl
+        0x3B => 0xE3, // LeftControl  -> Windows LeftGUI/Win
         0x38 => 0xE1, // LeftShift
         0x3A => 0xE2, // LeftOption (Alt)
-        0x36 => 0xE4, // RightCommand -> Windows RightControl (eskiden 0xE7)
-        0x3E => 0xE7, // RightControl -> Windows RightGUI/Win (eskiden 0xE4)
+        0x36 => 0xE4, // RightCommand -> Windows RightControl
+        0x3E => 0xE7, // RightControl -> Windows RightGUI/Win
         0x3C => 0xE5, // RightShift
         0x3D => 0xE6, // RightOption (AltGr)
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# keyboard-it — macOS dağıtım paketleyici.
-# release derler -> keyboard-it.app (menü-çubuğu ajanı) -> keyboard-it-<sürüm>.dmg
-# Native araçlar: cargo + codesign + hdiutil. Ekstra bağımlılık yok.
+# keyboard-it — macOS distribution packager.
+# Builds release -> keyboard-it.app (menu-bar agent) -> keyboard-it-<version>.dmg
+# Native tools only: cargo + codesign + hdiutil. No extra dependencies.
 #
-# Kullanım:  packaging/mac/package.sh
-# Çıktı:     dist/keyboard-it.app  ve  dist/keyboard-it-<sürüm>.dmg
+# Usage:   packaging/mac/package.sh
+# Output:  dist/keyboard-it.app  and  dist/keyboard-it-<version>.dmg
 set -euo pipefail
 
 APP_NAME="keyboard-it"
@@ -14,11 +14,11 @@ DISPLAY_NAME="keyboard-it"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-# Sürümü kök Cargo.toml'daki [workspace.package] bölümünden çek
-# (crate'ler version.workspace = true ile buradan miras alıyor).
+# Read the version from [workspace.package] in the root Cargo.toml
+# (the crates inherit it via version.workspace = true).
 VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
 if [ -z "$VERSION" ] || [[ "$VERSION" == *=* ]]; then
-  echo "HATA: kök Cargo.toml'dan sürüm okunamadı" >&2
+  echo "ERROR: could not read version from root Cargo.toml" >&2
   exit 1
 fi
 DIST="$ROOT/dist"
@@ -27,14 +27,14 @@ ICNS="$ROOT/crates/mac-sender/assets/$APP_NAME.icns"
 BIN="$ROOT/target/release/mac-sender"
 
 if [ ! -f "$ICNS" ]; then
-  echo "==> ikon bulunamadı, üretiliyor"
+  echo "==> icon not found, generating"
   python3 "$ROOT/packaging/mac/make_icon.py"
 fi
 
-echo "==> release derleniyor (opt-level=z, lto) — biraz sürebilir"
+echo "==> building release (opt-level=z, lto) — this can take a while"
 cargo build --release -p mac-sender
 
-echo "==> $APP_NAME.app iskeleti kuruluyor"
+echo "==> assembling $APP_NAME.app skeleton"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
@@ -67,16 +67,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>keyboard-it — kişisel LAN klavye/fare köprüsü</string>
+	<string>keyboard-it — personal LAN keyboard/mouse bridge</string>
 </dict>
 </plist>
 PLIST
 
-# Ad-hoc imza: Apple Silicon'da imzasız ikili öldürülür; bundle'ı yeniden imzala.
-echo "==> ad-hoc imzalanıyor (codesign -s -)"
-codesign --force -s - "$APP" 2>/dev/null || echo "   (codesign atlandı — sorun değil)"
+# Ad-hoc signature: Apple Silicon kills unsigned binaries; re-sign the bundle.
+echo "==> ad-hoc signing (codesign -s -)"
+codesign --force -s - "$APP" 2>/dev/null || echo "   (codesign skipped — not fatal)"
 
-echo "==> .dmg oluşturuluyor"
+echo "==> creating .dmg"
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
 rm -f "$DMG"
 STAGING="$(mktemp -d)"
@@ -86,11 +86,11 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING" -ov -format UDZO "$DMG
 rm -rf "$STAGING"
 
 echo ""
-echo "✅ hazır:"
+echo "done:"
 echo "   .app : $APP"
 echo "   .dmg : $DMG"
 echo ""
-echo "Kurulum: .dmg'yi aç, keyboard-it'i Applications'a sürükle."
-echo "İlk açılış (imzasız): Applications'ta sağ-tık -> Aç -> Aç."
-echo "İzin: Sistem Ayarları -> Gizlilik & Güvenlik -> Erişilebilirlik + Girdi İzleme'de"
-echo "      keyboard-it'i işaretle (yakalama için şart)."
+echo "Install: open the .dmg and drag keyboard-it into Applications."
+echo "First launch (unsigned): in Applications, right-click -> Open -> Open."
+echo "Permissions: System Settings -> Privacy & Security -> enable keyboard-it under"
+echo "             Accessibility and Input Monitoring (required for capture)."

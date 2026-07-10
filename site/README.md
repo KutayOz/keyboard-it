@@ -1,47 +1,48 @@
-# keyboard-it — landing / indirme sayfası
+# keyboard-it — landing / download page
 
-Claude Design'da tasarlanan `keyboard-it.dc.html`'in bağımsız, deploy edilebilir
-statik sürümü.
+Standalone static site with download links and install instructions.
 
-## Dağıtım mimarisi
-- **Birincil site: GitHub Pages** → `https://kutayoz.github.io/keyboard-it/`
-  `main`'e `site/**` push'unda `.github/workflows/pages.yml` otomatik deploy eder.
-  Neden: `*.pages.dev` Türkiye'de ISS seviyesinde SNI filtresine takılıyor
-  (TLS Client Hello'da RST); `github.io` erişilebilir.
-- **Yedek/ayna: Cloudflare Pages** → `https://keyboard-it.pages.dev`
-  Elle güncellenir: `npx wrangler pages deploy site --project-name keyboard-it`
-- **Installer'lar: GitHub Releases.** İndirme butonları ve `install-macos.sh`,
-  sürümden bağımsız `releases/latest/download/<sabit-ad>` linklerini kullanır:
+## Deployment architecture
+
+- **Primary: GitHub Pages** → https://kutayoz.github.io/keyboard-it/
+  `.github/workflows/pages.yml` deploys automatically when `site/**` is pushed to `main`.
+  Primary because `*.pages.dev` is SNI-filtered at ISP level in Turkey (RST on the TLS
+  Client Hello); `github.io` is reachable.
+- **Mirror: Cloudflare Pages** → https://keyboard-it.pages.dev
+  Updated manually: `npx wrangler pages deploy site --project-name keyboard-it`
+- **Installers: GitHub Releases.** The download buttons and `install-macos.sh` use
+  version-independent `releases/latest/download/<fixed-name>` links:
   - `keyboard-it-macos.dmg`
   - `keyboard-it-windows-x64.msi`
-  Bu sabit adlı kopyaları her `v*` tag'inde CI'ın release job'ı üretir
-  (bkz. `.github/workflows/build.yml` "Sabit adlı kopyalar" adımı); yanlarında
-  sürümlü adlar da (`keyboard-it-0.1.0.dmg` vb.) arşiv amaçlı durur.
+  The release job in `.github/workflows/build.yml` uploads these fixed-name copies on every
+  `v*` tag, next to the versioned filenames (`keyboard-it-0.1.0.dmg` etc.) kept for archival.
 
-## İçerik
-- `index.html` — tek dosya, kendine yeter (inline CSS + küçük vanilla JS scroll
-  animasyonu). İndirme linkleri GitHub Releases'e gider; sitede binary taşınmaz.
-- `keyboard-it.png` — favicon + hero ikonu.
-- `install-macos.sh` — macOS için terminal kurulum betiği (`curl … | sh`).
-  curl indirmesi quarantine bayrağı taşımadığı için Gatekeeper uyarısı hiç çıkmaz;
-  DMG'yi GitHub Releases'ten indirir, mount eder, `.app`'i `/Applications`'a
-  kopyalar ve açar. `index.html`'deki "Alternatif: Terminal ile tek komut" kutusu
-  bu dosyaya işaret eder. **Site domain'i değişirse** betiğin başındaki `BASE_URL`
-  (yalnız hata mesajlarında görünür) ve `index.html`'deki `curl …/install-macos.sh`
-  adresi güncellenir; DMG linki Releases'te olduğu için kurulum yine çalışır.
-- `downloads/` — repoda boş durur (`.gitkeep`). Yerelde test için CI çıktıları
-  buraya konabilir; binary'ler git'e commit EDİLMEZ (`.gitignore`).
+## Contents
 
-## Yeni sürüm çıkarma
-1. Sürümü kök `Cargo.toml`'daki `[workspace.package]`'ta yükselt, commit'le.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z` — CI derler, Release oluşturur,
-   sabit adlı kopyaları ekler. Site linkleri kendiliğinden yeni sürümü gösterir.
-3. `index.html`'de elle güncellenecek iki nokta: `<legend>` içindeki
-   "Download — vX.Y.Z" ve buton altındaki dosya boyutları.
-4. Site değişikliğini push'la (GitHub Pages otomatik); istersen Cloudflare
-   aynasını da wrangler ile tazele.
+- `index.html` — single self-contained file (inline CSS plus a small vanilla JS scroll
+  animation). Download links point to GitHub Releases; the site hosts no binaries.
+- `keyboard-it.png` — favicon and hero icon.
+- `install-macos.sh` — terminal installer (`curl … | sh`). Files downloaded with curl carry
+  no quarantine flag, so Gatekeeper never prompts. The script downloads the DMG from GitHub
+  Releases, mounts it, copies the `.app` to `/Applications`, and opens it. The terminal
+  install box in `index.html` points here. If the site domain changes, update `BASE_URL` at
+  the top of the script (shown only in error messages) and the `curl …/install-macos.sh`
+  address in `index.html`; the DMG link lives on Releases, so installs keep working.
+- `downloads/` — empty in the repo (`.gitkeep`). CI outputs can be dropped here for local
+  testing; binaries are never committed (`.gitignore`).
 
-## Yerel önizleme
+## Cutting a release
+
+1. Bump the version in the root `Cargo.toml` under `[workspace.package]`, commit.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z` — CI builds, creates the Release, and adds the
+   fixed-name copies. The site links pick up the new version automatically.
+3. Update two spots in `index.html` by hand: the "Download — vX.Y.Z" legend and the file
+   sizes under the buttons.
+4. Push the site change (GitHub Pages deploys automatically); optionally refresh the
+   Cloudflare mirror with wrangler.
+
+## Local preview
+
 ```bash
 python3 -m http.server 8099 --directory site
 # http://localhost:8099

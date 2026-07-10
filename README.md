@@ -1,79 +1,138 @@
 # keyboard-it
 
-MacBook Air'ın dahili klavyesiyle bir Windows PC'yi kontrol etmek. Aç/kapa: **Fn'e çift bas**.
+Use a MacBook's keyboard and trackpad to control a Windows PC over the local network.
 
-Yaklaşım: iki bilgisayara da kendi yazılımını kur, LAN üzerinden konuşsunlar
-(klavyeye indirgenmiş kendi Synergy/Deskflow'un). Donanım yok, Bluetooth yok.
+keyboard-it is a small software KVM: a menu bar app on the Mac captures keyboard and mouse
+input and streams it, encrypted, to a tray app on the Windows machine, which injects it into
+whatever window has focus. No extra hardware, no Bluetooth pairing, no cloud — one TCP
+connection on your LAN. Double-tap the Fn key to switch input between the two machines.
+
+## How it works
 
 ```
-Mac: dahili klavye -> CGEventTap (yakala + Fn toggle) -> HID usage'a çevir
-     -> framed TCP (ileride TLS) --LAN--> Windows: al -> HID->scancode
-     -> SendInput(KEYEVENTF_SCANCODE) -> odaktaki uygulama
+Mac (mac-sender)                                          Windows (win-receiver)
+CGEventTap ──► HID usage codes ──► Noise NNpsk0 / TCP ──► scancodes ──► SendInput
+capture + Fn toggle                encrypted, LAN only                  focused app
 ```
 
-## Workspace
+- Double-tap Fn toggles forwarding. While active, input is suppressed on the Mac and its
+  cursor is frozen; keys, mouse movement, clicks, and scroll go to Windows. Double-tap Fn
+  again to switch back.
+- The current state is always visible: a menu bar item on the Mac, a tray icon on Windows.
+- Cmd is mapped to Ctrl so shortcuts like copy/paste keep working; Turkish Q and F-keys are
+  translated.
+- The sender reconnects automatically, and the receiver releases held keys when the
+  connection drops, so nothing stays stuck on the Windows side.
 
-- `crates/protocol` — paylaşılan tel formatı (`KeyEvent` + encode/decode). OS'tan bağımsız, iki tarafın ortak dili.
-- `crates/mac-sender` — macOS binary (CGEventTap yakalama). Gerçek kod M2'de; `src/capture.rs` referans.
-- `crates/win-receiver` — Windows binary (`SendInput` enjeksiyon). M0 hazır.
+Workspace crates: `crates/protocol` (wire format, config, Noise handshake),
+`crates/mac-sender` (macOS menu bar app), `crates/win-receiver` (Windows tray app with a
+settings window).
 
-## Kilometre taşları
+## Install
 
-- **M0 ✅:** win-receiver Windows'ta SendInput ile tuş enjekte eder. (Doğrulandı.)
-- **M1 ✅:** tuşlar Mac -> Windows, TCP üzerinden. (İki makinede doğrulandı.)
-- **M2 ✅:** gerçek CGEventTap yakalama — Mac'te yaz, Windows'ta çık. (Doğrulandı.)
-- **M3 ✅:** çift-tıklama-Fn ile aç/kapa + aktifken Mac'te bastırma.
-- **Cila ✅:** Cmd→Ctrl + Türkçe Q + F-tuşları; TLS-benzeri Noise şifreleme; otomatik
-  yeniden bağlanma; kopmada takılı tuş bırakma; IP'yi hatırlama.
-- **Fare ✅:** trackpad/fare hareketi + tıklama + scroll (AKTİF iken Windows'a; Mac imleci
-  donar = KVM). Tek kaçış AKTİF iken çift-Fn.
+Download page: https://kutayoz.github.io/keyboard-it/ — or fetch the installers directly:
 
-## Şifreleme (zorunlu)
+- macOS: https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-macos.dmg
+- Windows: https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-windows-x64.msi
 
-Trafik Noise (`NNpsk0`) ile şifreli + karşılıklı doğrulanır. **İki makinede de AYNI
-`KEYBOARD_IT_KEY` parolası** ayarlı olmalı; yoksa program açılmaz, yanlışsa bağlantı reddedilir.
+The binaries are unsigned (see [Security model](#security-model)), so both OSes warn on first
+launch.
+
+### macOS
+
+Terminal install skips the Gatekeeper prompt entirely, because files downloaded with curl
+carry no quarantine flag:
 
 ```sh
-# Ortak, güçlü bir parola üret (bir kez), İKİ makinede de aynısını kullan:
-openssl rand -base64 24
-# Mac:      export KEYBOARD_IT_KEY='ürettiğin-değer'   (~/.zshrc'ye ekle)
-# Windows:  setx KEYBOARD_IT_KEY "ürettiğin-değer"     (yeni terminal aç)
+curl -fsSL https://kutayoz.github.io/keyboard-it/install-macos.sh | sh
 ```
 
-## Çalıştır (asıl özellik)
+The script downloads the DMG from GitHub Releases, mounts it, copies `keyboard-it.app` to
+`/Applications`, and opens it.
 
-**Ön koşul (Mac):** Sistem Ayarları > Klavye > "🌐/fn tuşuna basınca → Hiçbir şey yapma".
-**İzin (Mac):** terminale hem Giriş İzleme hem Erişilebilirlik ver.
-**Anahtar:** iki tarafta da `KEYBOARD_IT_KEY` ayarlı (yukarı bkz).
+If you install from the `.dmg` instead, macOS blocks the unsigned app on first open:
+
+- macOS 15 (Sequoia): open the app, dismiss the "Apple could not verify" dialog, then go to
+  System Settings → Privacy & Security → scroll to the "keyboard-it was blocked" row →
+  **Open Anyway** → open the app again.
+- macOS 14 and earlier: right-click the app in Applications → Open → Open.
+
+Required settings — the app cannot capture input without them:
+
+1. System Settings → Privacy & Security → **Input Monitoring** → enable keyboard-it.
+2. System Settings → Privacy & Security → **Accessibility** → enable keyboard-it.
+3. System Settings → Keyboard → "Press fn key to" → **Do Nothing**. Otherwise macOS grabs
+   double-Fn for Dictation or the emoji picker and the toggle misfires.
+
+Quit and reopen the app after granting permissions; they only apply to a freshly launched
+process. Permissions are tied to the binary's path, so grant them again if you move the
+`.app`.
+
+The app lives in the menu bar (no Dock icon) with three entries: **Settings** opens the
+config file in a text editor, **Start at Login** toggles a LaunchAgent, and **Quit** exits
+and restores normal cursor behavior.
+
+### Windows
+
+Run the `.msi`. SmartScreen flags the unsigned installer: click **More info → Run anyway**.
+The receiver runs in the system tray; its settings window takes the pairing key and port and
+can enable start-at-login. Allow it through the Windows firewall when prompted — it listens
+on the configured TCP port.
+
+### Pairing
+
+Both machines read a `config.toml` and must share the same pairing key. Generate one strong
+random value (for example with `openssl rand -base64 24`) and enter it on both sides.
+
+| Field           | Meaning                                                            |
+|-----------------|--------------------------------------------------------------------|
+| `shared_secret` | Pairing key. Must be identical on both machines.                   |
+| `peer_host`     | LAN IP of the Windows PC. Sender only; the receiver only listens.  |
+| `role`          | `sender` on the Mac, `receiver` on Windows.                        |
+| `port`          | TCP port, default `5599`. Must match on both sides.                |
+
+On the Mac, edit the file via the menu bar **Settings** entry; it lives at
+`~/Library/Application Support/com.keyboard-it.keyboard-it/config.toml`. On Windows, use the
+settings window from the tray icon. A missing key is fatal — the programs refuse to start —
+and a mismatched key fails the handshake.
+
+## Build from source
+
+Requires a Rust toolchain (https://rustup.rs).
 
 ```sh
-# Windows'ta: git pull + cargo run -p win-receiver, Notepad odakta.
-# Mac'te:
-cargo run -p mac-sender -- <windows-ip>
-# PASİF başlar. Fn'e çift bas → AKTİF (yazdığın Windows'a gider, Mac'te bastırılır).
-# Tekrar çift bas → PASİF. Kilitlenirsen: fareyle  menü > Force Quit.
+cargo build --release        # all crates for the host OS
+cargo run -p mac-sender      # macOS side
+cargo run -p win-receiver    # Windows side
 ```
 
-## M1'i çalıştır (iki makine)
+On a non-Windows host, `win-receiver` prints received events instead of injecting them, so
+the whole network path can be exercised on one machine against `127.0.0.1`.
 
-**Windows PC'de** (dinleyici — Notepad odakta tut, terminal değil):
-```sh
-cargo run -p win-receiver     # 0.0.0.0:5599 dinler; güvenlik duvarına izin ver
-```
+Packaging:
 
-**Mac'te** (gönderici — <windows-ip> = Windows'un LAN IP'si):
-```sh
-cargo run -p mac-sender -- <windows-ip>
-# Windows'ta Notepad'de "hello" belirmeli
-```
+- macOS `.dmg`: `packaging/mac/package.sh` builds a release binary, wraps it into
+  `keyboard-it.app` (menu bar agent, ad-hoc signed), and produces
+  `dist/keyboard-it-<version>.dmg`. Needs the Xcode command line tools; Python 3 with Pillow
+  only if you regenerate the icon (`packaging/mac/make_icon.py`).
+- Windows `.msi`: `cargo install cargo-wix`, then `cargo wix --package win-receiver`
+  (WiX v3).
+- CI (`.github/workflows/build.yml`) builds both installers on every `v*` tag and attaches
+  them to a GitHub Release, including fixed-name copies for the `latest/download` links.
 
-Ayrıntılı adım-adım + sorun giderme: `M1-HANDOFF-TR.md`.
+## Security model
 
-## Yerel dry-run testi (yalnız Mac, Windows olmadan)
+Built for a trusted home or office LAN, not the open internet.
 
-win-receiver Windows dışında enjekte etmez, gelen tuşları yazdırır — tüm ağ yolunu
-Mac'te test etmeni sağlar:
-```sh
-cargo run -p win-receiver          # bir terminalde (dry-run dinleyici)
-cargo run -p mac-sender -- 127.0.0.1   # başka terminalde
-```
+- Transport is `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` (the `snow` crate). Both sides prove
+  knowledge of a pre-shared key derived from `shared_secret` with BLAKE2s; all traffic is
+  encrypted with per-session ephemeral keys. No key, no start; wrong key, no connection.
+- The pairing key is stored in plaintext in the local config file (mode 0600 on macOS).
+  Anyone who can read that file can impersonate a peer.
+- The receiver listens on all interfaces on the configured port; the pre-shared key is the
+  only gate.
+- Binaries are unsigned and not notarized — hence the Gatekeeper and SmartScreen warnings.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

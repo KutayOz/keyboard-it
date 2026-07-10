@@ -1,12 +1,11 @@
-//! macOS menü çubuğu (status bar) göstergesi: PASİF/AKTİF + Çıkış.
+//! macOS menu bar (status bar) indicator: INACTIVE/ACTIVE + Quit.
 //!
-//! - Accessory aktivasyon politikası → Dock ikonu YOK, sadece menü çubuğu.
-//! - NSStatusItem başlığı bir emoji + metinle durumu gösterir.
-//! - Dropdown NSMenu içinde "Cikis" (Quit) → çıkmadan önce imleci yeniden bağlar.
+//! - Accessory activation policy → no Dock icon, menu bar only.
+//! - The NSStatusItem title shows the state as an emoji + text.
+//! - The dropdown NSMenu has "Quit" → re-associates the cursor before exiting.
 //!
-//! Her şey ANA THREAD'de çalışır (run() ana thread'den çağrılıyor, tap callback
-//! de ana thread'de tetikleniyor), bu yüzden başlığı callback'ten DOĞRUDAN
-//! güncellemek güvenli.
+//! Everything runs on the MAIN thread (run() is called from the main thread and the tap
+//! callback fires there too), so updating the title directly from the callback is safe.
 
 #![allow(non_snake_case)]
 
@@ -27,28 +26,28 @@ use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
 };
 
-/// Bağlantı durumu — win-receiver serve::ConnStatus ile parite
-/// (Connected/Disconnected/HandshakeFailed) + göndericiye özgü Connecting ve
-/// ConfigNeeded. AtomicU8 içinde taşınır: arka plan bağlantı thread'i yazar,
-/// ana-thread timer okuyup menü çubuğu başlığına yansıtır (bulgu düzeltmesi).
+/// Connection state — parity with win-receiver serve::ConnStatus
+/// (Connected/Disconnected/HandshakeFailed) plus the sender-specific Connecting and
+/// ConfigNeeded. Carried in an AtomicU8: the background connection thread writes it,
+/// a main-thread timer reads it and reflects it in the menu bar title.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum ConnStatus {
-    /// Eşleşme anahtarı ve/veya peer_host boş — 'Ayarlar...' ile doldurulmalı.
+    /// Pairing key and/or peer_host is empty — must be filled in via 'Settings...'.
     ConfigNeeded = 0,
-    /// Karşı tarafa TCP bağlantısı deneniyor.
+    /// TCP connection to the peer is being attempted.
     Connecting = 1,
-    /// Şifreli kanal kuruldu.
+    /// Encrypted channel established.
     Connected = 2,
-    /// Bağlantı kapandı/koptu; arka planda yeniden deneniyor.
+    /// Connection closed/dropped; retrying in the background.
     Disconnected = 3,
-    /// El sıkışma reddedildi — büyük olasılıkla anahtarlar iki tarafta FARKLI
-    /// (secure.rs 'karşı taraf el sıkışmayı reddetti' hatası).
+    /// Handshake rejected — most likely the keys differ between the two sides
+    /// (secure.rs reports this as the peer rejecting the handshake).
     HandshakeFailed = 4,
 }
 
 impl ConnStatus {
-    /// AtomicU8'den geri çevir (bilinmeyen değer = ConfigNeeded, en zararsızı).
+    /// Convert back from an AtomicU8 value (unknown value = ConfigNeeded, the most harmless).
     pub fn from_u8(v: u8) -> ConnStatus {
         match v {
             1 => ConnStatus::Connecting,
@@ -60,26 +59,26 @@ impl ConnStatus {
     }
 }
 
-/// PASİF/AKTİF + bağlantı durumuna göre menü çubuğu başlığı (emoji + metin).
-/// Bağlantı kopukken kullanıcı bunu menüden görebilsin (bulgu düzeltmesi).
+/// Menu bar title (emoji + text) for INACTIVE/ACTIVE plus the connection state, so a
+/// dropped connection is visible from the menu bar.
 pub fn title_for(active: bool, conn: ConnStatus) -> &'static NSString {
     match (conn, active) {
-        (ConnStatus::ConfigNeeded, _) => ns_string!("\u{2699}\u{FE0F} Ayar gerekli"), // ⚙️
-        (ConnStatus::HandshakeFailed, _) => ns_string!("\u{1F511} Anahtar uyuşmuyor"), // 🔑
-        (ConnStatus::Connecting, false) => ns_string!("\u{23F3} Bağlanıyor…"), // ⏳
-        (ConnStatus::Connecting, true) => ns_string!("\u{26A0}\u{FE0F} AKTIF (bağlanıyor…)"), // ⚠️
-        (ConnStatus::Disconnected, false) => ns_string!("\u{1F50C} Bağlantı yok"), // 🔌
-        (ConnStatus::Disconnected, true) => ns_string!("\u{26A0}\u{FE0F} AKTIF (bağlantı yok)"), // ⚠️
-        (ConnStatus::Connected, true) => ns_string!("\u{1F7E2} AKTIF"), // 🟢
-        (ConnStatus::Connected, false) => ns_string!("\u{1F512} PASIF"), // 🔒
+        (ConnStatus::ConfigNeeded, _) => ns_string!("\u{2699}\u{FE0F} Setup needed"), // gear
+        (ConnStatus::HandshakeFailed, _) => ns_string!("\u{1F511} Key mismatch"), // key
+        (ConnStatus::Connecting, false) => ns_string!("\u{23F3} Connecting…"), // hourglass
+        (ConnStatus::Connecting, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (connecting…)"), // warning
+        (ConnStatus::Disconnected, false) => ns_string!("\u{1F50C} No connection"), // plug
+        (ConnStatus::Disconnected, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (no connection)"), // warning
+        (ConnStatus::Connected, true) => ns_string!("\u{1F7E2} ACTIVE"), // green circle
+        (ConnStatus::Connected, false) => ns_string!("\u{1F512} INACTIVE"), // lock
     }
 }
 
-/// Kullanıcıya modal bilgi diyaloğu (NSAlert). LSUIElement .app'te stderr/stdout
-/// GÖRÜNMEZ — ilk kurulum / izin / hata gibi durumları kullanıcıya söylemenin
-/// görünür tek yolu bu (bulgu düzeltmesi).
+/// Modal info dialog (NSAlert). In an LSUIElement .app stderr/stdout are invisible —
+/// this is the only visible way to tell the user about first-run setup, permissions,
+/// or errors.
 pub fn show_alert(mtm: MainThreadMarker, title: &str, text: &str) {
-    // Accessory (Dock'suz) uygulamada diyalog arka planda kalmasın: öne getir.
+    // In an Accessory (no Dock) app the dialog can stay behind other windows: bring it forward.
     let app = NSApplication::sharedApplication(mtm);
     unsafe {
         let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
@@ -90,9 +89,9 @@ pub fn show_alert(mtm: MainThreadMarker, title: &str, text: &str) {
     let _ = alert.runModal();
 }
 
-/// İki butonlu diyalog: 'Ayarları Aç' / 'Daha Sonra'. true = kullanıcı ayarları
-/// açmak istedi; NE açılacağına çağıran karar verir (ilk kurulumda config.toml,
-/// izin diyaloğunda Sistem Ayarları > Giriş İzleme bölmesi).
+/// Two-button dialog: 'Open Settings' / 'Later'. Returns true when the user chose to
+/// open settings; the caller decides WHAT to open (config.toml for first-run setup,
+/// the System Settings Input Monitoring pane for the permission dialog).
 pub fn show_setup_alert(mtm: MainThreadMarker, title: &str, text: &str) -> bool {
     let app = NSApplication::sharedApplication(mtm);
     unsafe {
@@ -101,14 +100,14 @@ pub fn show_setup_alert(mtm: MainThreadMarker, title: &str, text: &str) -> bool 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(text));
-    let _ = alert.addButtonWithTitle(ns_string!("Ayarları Aç"));
-    let _ = alert.addButtonWithTitle(ns_string!("Daha Sonra"));
-    // İlk eklenen buton = NSAlertFirstButtonReturn.
+    let _ = alert.addButtonWithTitle(ns_string!("Open Settings"));
+    let _ = alert.addButtonWithTitle(ns_string!("Later"));
+    // The first button added = NSAlertFirstButtonReturn.
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
-/// AKTİF iken CGAssociateMouseAndMouseCursorPosition(0) imleci donduruyor.
-/// Çıkışta yeniden bağlamazsak imleç sistem genelinde donuk kalır.
+/// While ACTIVE, CGAssociateMouseAndMouseCursorPosition(0) freezes the cursor.
+/// Without re-associating on exit, the cursor stays frozen system-wide.
 fn reassociate_cursor() {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
@@ -128,7 +127,7 @@ define_class!(
     unsafe impl NSObjectProtocol for QuitDelegate {}
 
     unsafe impl NSApplicationDelegate for QuitDelegate {
-        // terminate: (menüden Çıkış) çıkıştan hemen ÖNCE ana thread'de tetiklenir.
+        // terminate: (Quit menu item) fires on the main thread right before exit.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
             reassociate_cursor();
@@ -136,21 +135,21 @@ define_class!(
     }
 
     impl QuitDelegate {
-        // Menü "Cikis" -> NSApp.terminate (applicationWillTerminate temizliği tetiklenir).
+        // Menu "Quit" -> NSApp.terminate (triggers the applicationWillTerminate cleanup).
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
             let mtm = self.mtm();
             NSApplication::sharedApplication(mtm).terminate(None);
         }
 
-        // Menü "Ayarlar..." -> config.toml'u editörde aç.
+        // Menu "Settings..." -> open config.toml in an editor.
         #[unsafe(method(settings:))]
         fn settings(&self, _sender: Option<&AnyObject>) {
             let _ = protocol::config::Config::edit();
         }
 
-        // Menü "Girişte Başlat" -> LaunchAgent'ı aç/kapat + tik işaretini güncelle.
-        // sender = tıklanan NSMenuItem; setState ile tiki yansıtırız.
+        // Menu "Start at Login" -> toggle the LaunchAgent and update the checkmark.
+        // sender = the clicked NSMenuItem; setState reflects the checkmark.
         #[unsafe(method(toggleStartup:))]
         fn toggle_startup(&self, sender: Option<&AnyObject>) {
             let now = crate::autostart::is_enabled();
@@ -173,15 +172,15 @@ impl QuitDelegate {
     }
 }
 
-/// Menü çubuğu kurulumunun sonucu. Status item + delegate'i CANLI tutmak için
-/// çağıran bunları düşürmeden saklamalı — düşerse öğe menü çubuğundan kaybolur.
+/// Result of the menu bar setup. The caller must keep the status item and delegate
+/// alive without dropping them — if dropped, the item disappears from the menu bar.
 pub struct MenuBar {
     pub status_item: Retained<NSStatusItem>,
     _delegate: Retained<QuitDelegate>,
 }
 
-/// NSApplication'ı Accessory yap, status item + Çıkış menüsü kur, başlangıç
-/// başlığını yaz. app.run() ÇAĞIRMAZ — çağıran tap kurulumundan sonra çağırır.
+/// Make NSApplication an Accessory app, install the status item + menu, and set the
+/// initial title. Does NOT call app.run() — the caller does that after tap setup.
 pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStatus) -> MenuBar {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -189,8 +188,8 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     let bar = NSStatusBar::systemStatusBar();
     let status_item = bar.statusItemWithLength(NSVariableStatusItemLength);
     if let Some(button) = status_item.button(mtm) {
-        // Başlangıç durumu: bağlantıyı arka plan thread'i kurar; config eksikse
-        // çağıran ConfigNeeded verir ('Ayar gerekli' görünür).
+        // Initial state: the background thread establishes the connection; when the
+        // config is incomplete the caller passes ConfigNeeded ('Setup needed' shows).
         button.setTitle(title_for(initial_active, initial_conn));
     }
 
@@ -201,7 +200,7 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     let settings = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            ns_string!("Ayarlar..."),
+            ns_string!("Settings..."),
             Some(sel!(settings:)),
             ns_string!(","),
         )
@@ -212,14 +211,14 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     let startup = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            ns_string!("Girişte Başlat"),
+            ns_string!("Start at Login"),
             Some(sel!(toggleStartup:)),
             ns_string!(""),
         )
     };
     unsafe { startup.setTarget(Some(&delegate)) };
     unsafe {
-        // Açılışta gerçek durumu (LaunchAgent var mı) tik olarak yansıt.
+        // Reflect the real state (LaunchAgent present or not) as the checkmark at startup.
         let state: isize = if crate::autostart::is_enabled() { 1 } else { 0 };
         let _: () = msg_send![&*startup, setState: state];
     }
@@ -228,7 +227,7 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            ns_string!("Cikis"),
+            ns_string!("Quit"),
             Some(sel!(quit:)),
             ns_string!("q"),
         )
@@ -243,9 +242,9 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     }
 }
 
-/// Menü çubuğu başlığını periyodik olarak `active` + `conn` (+ izin) durumuna göre
-/// günceller. Tap callback ve bağlantı thread'i Send olmak zorunda (objc2 nesneleri
-/// !Send, oralara taşınamaz), bu yüzden başlığı bu ANA-THREAD timer'ından güncelliyoruz.
+/// Periodically updates the menu bar title from the `active` + `conn` (+ permission)
+/// state. The tap callback and connection thread must be Send (objc2 objects are !Send
+/// and cannot move there), so the title is updated from this MAIN-thread timer.
 pub fn install_status_updater(
     mtm: MainThreadMarker,
     status_item: Retained<NSStatusItem>,
@@ -253,7 +252,7 @@ pub fn install_status_updater(
     conn: Arc<AtomicU8>,
     permission_needed: Arc<AtomicBool>,
 ) {
-    // None = ilk tikte kesin bir kez yaz (setup'taki başlangıç başlığı ne olursa olsun).
+    // None = write once on the first tick, whatever the initial title from setup() was.
     let last: Cell<Option<(bool, u8, bool)>> = Cell::new(None);
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
         let now = (
@@ -264,9 +263,9 @@ pub fn install_status_updater(
         if last.get() != Some(now) {
             last.set(Some(now));
             if let Some(button) = status_item.button(mtm) {
-                // İzin eksikse hiçbir şey yakalanamaz — bu her durumun önüne geçer.
+                // Without the permission nothing can be captured — it overrides every other state.
                 let title = if now.2 {
-                    ns_string!("\u{26D4} İzin gerekli") // ⛔
+                    ns_string!("\u{26D4} Permission needed") // no-entry sign
                 } else {
                     title_for(now.0, ConnStatus::from_u8(now.1))
                 };

@@ -2,24 +2,27 @@
 /target
 **/target
 
-# Dağıtım çıktıları (paketleme scriptleri üretir; commit edilmez)
+# Distribution outputs (produced by the packaging scripts; not committed)
 /dist
 
-# Landing sayfasındaki installer'lar (CI/dist'ten kopyalanır; git'e girmez)
+# Installers on the landing page (copied from CI/dist; kept out of git)
 site/downloads/*.dmg
 site/downloads/*.msi
 
-# İkon ara-çıktısı (make_icon.py üretir; .icns/.png kaynağı commit edilir)
+# Icon intermediate output (make_icon.py produces it; the .icns/.png sources are committed)
 *.iconset/
 
 # macOS
 .DS_Store
 
-# kalfa eklentisi durum dosyaları (bu projeye ait değil)
+# Python (packaging/mac/make_icon.py)
+__pycache__/
+
+# kalfa plugin state files (not part of this project)
 .kalfa/
 **/.kalfa/
 
-# Cargo.lock: binary/uygulama olduğu için commit EDİLİR (bilerek ignore edilmedi).
+# Cargo.lock: committed on purpose (these are binary crates), so not ignored here.
 
-# wrangler yerel önbelleği (deploy aracı; repoya girmez)
+# wrangler local cache (deploy tool; kept out of the repo)
 .wrangler/

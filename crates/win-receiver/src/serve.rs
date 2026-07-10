@@ -1,8 +1,8 @@
-//! TCP alıcı: bağlantı kabul → Noise handshake → olayları çöz + enjekte.
-//! Windows GUI'den **Başlat/Durdur** edilebilir: accept döngüsü kesintilidir ve
-//! canlı bağlantı `shutdown` ile kesilerek bloklayan okuma sonlandırılır.
-//! Her bağlantı KENDİ thread'inde çalışır ve "en yeni bağlantı kazanır":
-//! Mac uykudan dönüp yeniden bağlanınca yarı-açık ölü oturum anında düşürülür.
+//! TCP receiver: accept connection → Noise handshake → decode events + inject.
+//! Start/Stop from the Windows GUI works because the accept loop is interruptible and a
+//! live connection is cut via `shutdown`, which ends the blocking read.
+//! Each connection runs on its OWN thread and "newest connection wins": when the Mac
+//! wakes from sleep and reconnects, the half-open dead session is dropped immediately.
 
 use std::collections::HashSet;
 use std::io;
@@ -16,27 +16,27 @@ use protocol::{InputEvent, KeyEvent, MsgType};
 
 use crate::inject;
 
-/// Bağlantı durumu — arka thread'den GUI status satırına taşınır (bkz. gui.rs).
+/// Connection state — carried from the background thread to the GUI status line (see gui.rs).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ConnStatus {
-    /// Şifreli kanal kuruldu.
+    /// Encrypted channel established.
     Connected,
-    /// Bağlantı kapandı/koptu; yeniden dinleniyor.
+    /// Connection closed/lost; listening again.
     Disconnected,
-    /// El sıkışma başarısız — büyük olasılıkla eşleşme anahtarı iki tarafta farklı.
+    /// Handshake failed — most likely the pairing key differs between the two machines.
     HandshakeFailed,
 }
 
 type OnConn = Arc<dyn Fn(ConnStatus) + Send + Sync>;
 
-/// Canlı bağlantı yuvası: (nesil, stream klonu). Nesil numarası sayesinde geç
-/// ölen ESKİ bir bağlantının thread'i, yerine geçen YENİ bağlantının kaydını
-/// silemez ve GUI durumunu ezemez.
+/// Live connection slot: (generation, stream clone). The generation number keeps the
+/// thread of an OLD connection that dies late from clearing the record of the NEW
+/// connection that replaced it and from clobbering the GUI state.
 type ConnSlot = Arc<Mutex<Option<(u64, TcpStream)>>>;
 
-/// Ölü peer algılama: TCP keepalive. Mac uyur / Wi-Fi düşerse (sert kopma,
-/// EOF/RST gelmez) okuma sonsuza dek bloklanmaz; ~30 sn içinde hata döner ve
-/// Windows'ta basılı kalan tuşlar bırakılır.
+/// Dead peer detection: TCP keepalive. If the Mac sleeps or Wi-Fi drops (hard cut, no
+/// EOF/RST), the read does not block forever; it errors within ~30 s and keys still held
+/// down on Windows are released.
 fn set_keepalive(stream: &TcpStream) {
     use socket2::{SockRef, TcpKeepalive};
     let ka = TcpKeepalive::new()
@@ -45,8 +45,8 @@ fn set_keepalive(stream: &TcpStream) {
     let _ = SockRef::from(stream).set_tcp_keepalive(&ka);
 }
 
-/// Yuva hâlâ bizim neslimizi tutuyorsa boşalt. `true` = biz güncel bağlantıydık
-/// (durum bildirmek bize düşer); `false` = Stop ya da daha yeni bağlantı devraldı.
+/// Clear the slot if it still holds our generation. `true` = we were the current
+/// connection (reporting status is on us); `false` = Stop or a newer connection took over.
 fn clear_if_current(conn: &ConnSlot, my_gen: u64) -> bool {
     let mut slot = conn.lock().unwrap();
     match *slot {
@@ -58,8 +58,8 @@ fn clear_if_current(conn: &ConnSlot, my_gen: u64) -> bool {
     }
 }
 
-/// Tek bağlantı: handshake + olay döngüsü (bağlantı başına bir thread).
-/// Yuvaya klon accept_loop'ta konur ki `stop()` bloklayan okumayı hep kesebilsin.
+/// Single connection: handshake + event loop (one thread per connection).
+/// The clone goes into the slot in accept_loop so `stop()` can always cut a blocking read.
 fn handle_client(
     mut stream: TcpStream,
     my_gen: u64,
@@ -69,23 +69,23 @@ fn handle_client(
 ) {
     let peer = stream.peer_addr().ok();
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_nonblocking(false); // handshake/okuma bloklamalı
-    println!("bağlandı: {peer:?}");
+    let _ = stream.set_nonblocking(false); // handshake/reads must block
+    println!("connected: {peer:?}");
 
-    // Sessiz kalan yabancı bağlantı (port tarayıcı, `nc` vb.) dinleyiciyi
-    // süresiz kilitleyemesin: el sıkışma 5 sn içinde bitmek zorunda.
+    // A silent foreign connection (port scanner, `nc`, etc.) must not lock the listener
+    // indefinitely: the handshake has to finish within 5 s.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 
     let mut transport = match protocol::secure::handshake_responder(&mut stream, psk) {
         Ok(t) => {
-            println!("şifreli kanal kuruldu (Noise NNpsk0).");
+            println!("encrypted channel established (Noise NNpsk0).");
             t
         }
         Err(e) => {
-            eprintln!("el sıkışma başarısız (yanlış anahtar?): {e}");
-            // Zaman aşımı/EOF/reset anahtar sorunu değildir (tarayıcı vb.);
-            // gerçek el sıkışma hatasını GUI'ye taşı — release'te stderr
-            // görünmez, kullanıcı yanlış anahtarı ancak böyle fark eder.
+            eprintln!("handshake failed (wrong key?): {e}");
+            // Timeout/EOF/reset is not a key problem (scanners etc.); carry a real
+            // handshake failure to the GUI — stderr is invisible in release builds, so
+            // this is the only way the user notices a wrong key.
             let network = matches!(
                 e.kind(),
                 io::ErrorKind::TimedOut
@@ -100,8 +100,8 @@ fn handle_client(
             return;
         }
     };
-    // El sıkışma tamam: zaman aşımını kaldır (boşta beklemek meşru);
-    // ölü bağlantıyı bundan sonra TCP keepalive yakalar.
+    // Handshake done: drop the timeout (idling is legitimate); from here on a dead
+    // connection is caught by TCP keepalive.
     let _ = stream.set_read_timeout(None);
     on_conn(ConnStatus::Connected);
 
@@ -133,9 +133,9 @@ fn handle_client(
             },
             Err(e) => {
                 if e.kind() == io::ErrorKind::UnexpectedEof {
-                    println!("bağlantı kapandı: {peer:?}");
+                    println!("connection closed: {peer:?}");
                 } else {
-                    eprintln!("okuma/çözme hatası: {e}");
+                    eprintln!("read/decode error: {e}");
                 }
                 for hid in held.drain() {
                     inject::handle(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
@@ -143,8 +143,8 @@ fn handle_client(
                 for button in held_btns.drain() {
                     inject::handle_mouse(InputEvent::MouseButton { button, down: false });
                 }
-                // Yalnızca hâlâ güncel bağlantıysak durum bildir; Stop ya da
-                // yeni bağlantı devraldıysa onların mesajını ezmeyelim.
+                // Only report status if we are still the current connection; if Stop or
+                // a newer connection took over, do not clobber their message.
                 if clear_if_current(conn, my_gen) {
                     on_conn(ConnStatus::Disconnected);
                 }
@@ -154,9 +154,9 @@ fn handle_client(
     }
 }
 
-/// Kesintili accept döngüsü. `stop` true olunca döner. Her bağlantı ayrı
-/// thread'e verilir ve yeni bağlantı eskisini keser (en yeni kazanır) —
-/// böylece yarı-açık ölü oturum yeniden bağlanmayı asla engelleyemez.
+/// Interruptible accept loop. Returns when `stop` turns true. Each connection gets its
+/// own thread and a new connection cuts the old one (newest wins) — a half-open dead
+/// session can never block reconnection.
 fn accept_loop(
     listener: TcpListener,
     psk: [u8; 32],
@@ -172,8 +172,8 @@ fn accept_loop(
                 let my_gen = generation;
                 set_keepalive(&stream);
 
-                // Eskiyi kes + klonu yuvaya koy — hepsi kilit altında ki
-                // Stop ile yarışıp sahipsiz canlı bağlantı kalmasın.
+                // Cut the old connection + put the clone into the slot — all under the
+                // lock so a race with Stop cannot leave an orphaned live connection.
                 {
                     let mut slot = conn.lock().unwrap();
                     if stop.load(Ordering::Relaxed) {
@@ -181,7 +181,7 @@ fn accept_loop(
                         break;
                     }
                     if let Some((_, old)) = slot.take() {
-                        println!("yeni bağlantı geldi — eski oturum kesiliyor");
+                        println!("new connection — cutting the old session");
                         let _ = old.shutdown(Shutdown::Both);
                     }
                     if let Ok(c) = stream.try_clone() {
@@ -198,14 +198,14 @@ fn accept_loop(
                 thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                eprintln!("bağlantı kabul hatası: {e}");
+                eprintln!("accept error: {e}");
                 thread::sleep(Duration::from_millis(200));
             }
         }
     }
 }
 
-/// Durdurulabilir dinleyici tutamacı.
+/// Stoppable listener handle.
 pub struct Handle {
     stop: Arc<AtomicBool>,
     conn: ConnSlot,
@@ -213,8 +213,8 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Dinlemeyi durdur: bayrağı çevir, canlı bağlantıyı kes, accept thread'ini
-    /// join et (accept döngüsü bloklamaz, join hızla döner).
+    /// Stop listening: flip the flag, cut the live connection, join the accept thread
+    /// (the accept loop does not block, so the join returns quickly).
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some((_, s)) = self.conn.lock().unwrap().take() {
@@ -232,17 +232,17 @@ impl Drop for Handle {
     }
 }
 
-/// Dinlemeyi başlat. Anahtar/port hataları HEMEN döner (GUI'ye gösterilir).
-/// `on_conn(ConnStatus)` bağlantı kurulunca/kopunca/el sıkışma bozulunca
-/// arka thread'den çağrılır.
+/// Start listening. Key/port errors return IMMEDIATELY (shown in the GUI).
+/// `on_conn(ConnStatus)` is called from the background thread when a connection is
+/// established or lost, or when the handshake fails.
 pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
     cfg: &protocol::config::Config,
     on_conn: F,
 ) -> io::Result<Handle> {
-    let psk = protocol::secure::psk_from_config_or_env(cfg)?; // anahtar hatası -> GUI
-    let listener = TcpListener::bind(("0.0.0.0", cfg.port))?; // port hatası -> GUI
+    let psk = protocol::secure::psk_from_config_or_env(cfg)?; // key error -> GUI
+    let listener = TcpListener::bind(("0.0.0.0", cfg.port))?; // port error -> GUI
     listener.set_nonblocking(true)?;
-    println!("win-receiver dinliyor: 0.0.0.0:{} — bağlantı bekleniyor", cfg.port);
+    println!("win-receiver listening on 0.0.0.0:{} — waiting for connection", cfg.port);
 
     let stop = Arc::new(AtomicBool::new(false));
     let conn: ConnSlot = Arc::new(Mutex::new(None));
@@ -253,17 +253,17 @@ pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
     Ok(Handle { stop, conn, thread: Some(thread) })
 }
 
-/// Non-Windows dry-run: bloklayan sürüm (durdurma yok; süreç ölene dek dinler).
+/// Non-Windows dry-run: blocking variant (no stop; listens until the process dies).
 #[cfg(not(windows))]
 pub fn serve(
     cfg: &protocol::config::Config,
     on_conn: impl Fn(ConnStatus) + Send + Sync + 'static,
 ) -> io::Result<()> {
-    println!("(bu platformda enjeksiyon YOK — gelen tuşlar sadece yazdırılır [dry-run])");
+    println!("(no injection on this platform — incoming keys are only printed [dry-run])");
     let psk = protocol::secure::psk_from_config_or_env(cfg)?;
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))?;
     listener.set_nonblocking(true)?;
-    println!("win-receiver dinliyor: 0.0.0.0:{} — bağlantı bekleniyor", cfg.port);
+    println!("win-receiver listening on 0.0.0.0:{} — waiting for connection", cfg.port);
     let stop = Arc::new(AtomicBool::new(false));
     let conn: ConnSlot = Arc::new(Mutex::new(None));
     let on_conn: OnConn = Arc::new(on_conn);

@@ -1,17 +1,17 @@
 import { LineEdit, Button, CheckBox, VerticalBox, HorizontalBox, GroupBox, AboutSlint } from "std-widgets.slint";
 
-// Küçük ayar penceresi — tepsiden "Ayarlar..." ile açılır, kapanınca uygulama yaşar.
+// Small settings window — opened from the tray via "Settings...", the app outlives closing it.
 export component SettingsWindow inherits Window {
     title: "keyboard-it";
     preferred-width: 380px;
     preferred-height: 360px;
 
-    in property <bool> active;                 // dinleyici durumu (AKTİF/PASİF)
+    in property <bool> active;                 // listener state (ACTIVE/INACTIVE)
     in-out property <string> pairing-key;
     in-out property <string> peer-ip;
     in-out property <string> peer-port;
     in-out property <bool> autostart;
-    in property <string> status-line;          // Rust'tan bilgi/hata mesajı
+    in property <string> status-line;          // info/error message from Rust
 
     callback start-listener();
     callback stop-listener();
@@ -23,24 +23,24 @@ export component SettingsWindow inherits Window {
         spacing: 8px;
 
         Text {
-            text: root.active ? "● AKTİF — 5599 dinleniyor" : "○ PASİF — durduruldu";
+            text: root.active ? "● ACTIVE — listening on 5599" : "○ INACTIVE — stopped";
             color: root.active ? #2e7d32 : #b71c1c;
             font-size: 15px;
             font-weight: 700;
         }
 
         GroupBox {
-            title: "Ayarlar";
+            title: "Settings";
             VerticalBox {
                 spacing: 6px;
-                Text { text: "Eşleşme anahtarı (iki tarafta AYNI olmalı)"; }
+                Text { text: "Pairing key (must be IDENTICAL on both machines)"; }
                 LineEdit { placeholder-text: "KEYBOARD_IT_KEY"; text <=> root.pairing-key; }
-                Text { text: "Peer IP (gönderen Mac)"; }
+                Text { text: "Peer IP (the sending Mac)"; }
                 LineEdit { placeholder-text: "192.168.1.x"; text <=> root.peer-ip; }
                 Text { text: "Port"; }
                 LineEdit { placeholder-text: "5599"; text <=> root.peer-port; }
                 CheckBox {
-                    text: "Oturum açılışında otomatik başlat (yükseltilmiş)";
+                    text: "Start automatically at logon (elevated)";
                     checked <=> root.autostart;
                     toggled => { root.autostart-changed(self.checked); }
                 }
@@ -50,12 +50,12 @@ export component SettingsWindow inherits Window {
         HorizontalBox {
             spacing: 8px;
             Button {
-                text: root.active ? "Durdur" : "Başlat";
+                text: root.active ? "Stop" : "Start";
                 clicked => {
                     if (root.active) { root.stop-listener(); } else { root.start-listener(); }
                 }
             }
-            Button { text: "Kaydet"; clicked => { root.save(); } }
+            Button { text: "Save"; clicked => { root.save(); } }
         }
 
         Text { text: root.status-line; color: #808080; font-size: 12px; }
@@ -65,26 +65,26 @@ export component SettingsWindow inherits Window {
     }
 }
 
-// Sistem tepsisi ikonu (Slint 1.17 native SystemTrayIcon → Shell_NotifyIconW).
-// Mac menü çubuğuyla eşdeğerlik: durum bir bakışta görünsün — ikon, tooltip ve
-// menüdeki "Durum:" satırı bağlantı durumuyla canlı değişir (Menu reaktiftir).
+// System tray icon (Slint 1.17 native SystemTrayIcon → Shell_NotifyIconW).
+// Parity with the Mac menu bar: state visible at a glance — the icon, tooltip and the
+// "Status:" menu line change live with the connection state (Menu is reactive).
 export component Tray inherits SystemTrayIcon {
     in property <bool> active;
-    // Bağlantı durumu (Rust serve::ConnStatus'tan): 0 bekleniyor, 1 bağlı, 2 anahtar hatası.
+    // Connection state (from Rust serve::ConnStatus): 0 waiting, 1 connected, 2 key mismatch.
     in property <int> conn: 0;
 
-    // Durum metni tek kaynaktan: tooltip ve menü satırı aynı ifadeyi kullanır.
-    property <string> durum: !root.active ? "Durduruldu"
-        : root.conn == 1 ? "Bağlı"
-        : root.conn == 2 ? "Anahtar hatası"
-        : "Bağlantı bekleniyor";
+    // Status text from a single source: the tooltip and the menu line use the same wording.
+    property <string> status-text: !root.active ? "Stopped"
+        : root.conn == 1 ? "Connected"
+        : root.conn == 2 ? "Key mismatch"
+        : "Waiting for connection";
 
-    // tray-on/err/off.png = tray.png + yeşil/kırmızı nokta / gri ton.
+    // tray-on/err/off.png = tray.png + green/red dot / grayscale.
     icon: !root.active ? @image-url("tray-off.png")
         : root.conn == 1 ? @image-url("tray-on.png")
         : root.conn == 2 ? @image-url("tray-err.png")
         : @image-url("tray.png");
-    tooltip: root.active ? "keyboard-it — AKTİF — " + root.durum : "keyboard-it — PASİF";
+    tooltip: root.active ? "keyboard-it — ACTIVE — " + root.status-text : "keyboard-it — INACTIVE";
 
     callback show-settings();
     callback toggle-listener();
@@ -92,21 +92,21 @@ export component Tray inherits SystemTrayIcon {
 
     Menu {
         MenuItem {
-            title: "Durum: " + root.durum;
-            enabled: false; // tıklanmaz bilgi satırı
+            title: "Status: " + root.status-text;
+            enabled: false; // non-clickable info line
         }
         MenuSeparator { }
         MenuItem {
-            title: root.active ? "Durdur" : "Başlat";
+            title: root.active ? "Stop" : "Start";
             activated => { root.toggle-listener(); }
         }
         MenuItem {
-            title: "Ayarlar...";
+            title: "Settings...";
             activated => { root.show-settings(); }
         }
         MenuSeparator { }
         MenuItem {
-            title: "Çıkış";
+            title: "Quit";
             activated => { root.quit(); }
         }
     }

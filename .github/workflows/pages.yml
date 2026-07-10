@@ -1,8 +1,7 @@
 name: pages
 
-# site/ klasörünü GitHub Pages'e yayımlar (birincil dağıtım adresi).
-# Neden GitHub Pages: *.pages.dev Türkiye'de ISS seviyesinde SNI filtresine
-# takılıyor; github.io erişilebilir. Cloudflare Pages kopyası yedek olarak durur.
+# Publishes site/ to GitHub Pages (primary distribution URL).
+# Why GitHub Pages: *.pages.dev is SNI-blocked by Turkish ISPs; github.io is reachable.
 on:
   push:
     branches: [main]
@@ -14,7 +13,7 @@ permissions:
   pages: write
   id-token: write
 
-# Aynı anda tek deploy: üst üste push'ta eskisi iptal edilir.
+# One deploy at a time: a newer push cancels the in-flight one.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -27,8 +26,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      # downloads/ repoda boştur (.gitkeep); indirme linkleri GitHub Releases'e
-      # gittiği için binary taşınmaz — site küçük ve hızlı deploy olur.
+      # downloads/ is empty in the repo (.gitkeep); download links point to GitHub
+      # Releases, so no binaries are shipped — the site stays small and deploys fast.
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

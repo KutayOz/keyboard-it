@@ -5,9 +5,9 @@ edition = "2021"
 
 [dependencies]
 protocol = { path = "../protocol" }
-socket2 = "0.5"   # TCP keepalive — yarı-açık bağlantı algılama (net.rs, win-receiver ile parite)
+socket2 = "0.5"   # TCP keepalive — half-open connection detection (net.rs, parity with win-receiver)
 
-# core-graphics/core-foundation/objc2 YALNIZCA macOS hedefinde çözülür/derlenir.
+# core-graphics/core-foundation/objc2 resolve/compile only on macOS targets.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"

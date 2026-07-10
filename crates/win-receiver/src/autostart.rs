@@ -1,12 +1,12 @@
-//! Oturum açılışı otomatik başlatma — **yükseltilmiş** Zamanlanmış Görev (`/rl highest`).
-//! Enjeksiyon yükseltilmiş (admin) pencerelere de gidebilsin diye görev "highest" açılır.
-//! Kur/sil tek seferlik UAC ister (`ShellExecuteW "runas"`); durum `schtasks /query` ile.
+//! Autostart at logon — **elevated** Scheduled Task (`/rl highest`).
+//! The task runs "highest" so injection also reaches elevated (admin) windows.
+//! Install/remove asks for UAC once (`ShellExecuteW "runas"`); state via `schtasks /query`.
 
 use std::io;
 
 const TASK: &str = "keyboard-it";
 
-/// Görev kurulu mu? (yükseltme gerektirmez)
+/// Is the task installed? (no elevation required)
 pub fn is_enabled() -> bool {
     std::process::Command::new("schtasks")
         .args(["/query", "/tn", TASK])
@@ -17,14 +17,14 @@ pub fn is_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Görevi kur/sil (yükseltilmiş). Zaten istenen durumdaysa hiçbir şey yapmaz.
+/// Install/remove the task (elevated). Does nothing if already in the requested state.
 pub fn set_enabled(on: bool) -> io::Result<()> {
     if on == is_enabled() {
         return Ok(());
     }
     let params = if on {
         let exe = std::env::current_exe()?;
-        // /TR değeri = tırnaklı exe yolu (boşluklu Program Files için): /TR "\"<exe>\""
+        // /TR value = quoted exe path (for Program Files with spaces): /TR "\"<exe>\""
         format!(
             "/Create /TN {TASK} /TR \"\\\"{}\\\"\" /SC ONLOGON /RL HIGHEST /F",
             exe.display()
@@ -34,11 +34,11 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
     };
     run_elevated("schtasks.exe", &params)?;
 
-    // ShellExecuteW yalnızca LANSMANIN başarısını bildirir; schtasks asenkron
-    // çalışır ve çıkış kodu okunmaz. Hemen dönersek gui'deki is_enabled()
-    // yansıtmasıyla yarışırız (checkbox eski duruma geri döner) ve schtasks
-    // gerçek bir hatayla çıksa bile "başarılı" deriz. Sonucu doğrula: görev
-    // durumu istenen hale gelene dek kısa süre bekle, gelmezse hata döndür.
+    // ShellExecuteW only reports that the LAUNCH succeeded; schtasks runs asynchronously
+    // and its exit code is never read. Returning immediately would race the is_enabled()
+    // refresh in gui.rs (the checkbox would snap back) and would report success even if
+    // schtasks exited with a real error. Verify the outcome: wait briefly until the task
+    // state matches the request, and return an error if it never does.
     for _ in 0..16 {
         std::thread::sleep(std::time::Duration::from_millis(250));
         if is_enabled() == on {
@@ -47,11 +47,11 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
     }
     Err(io::Error::new(
         io::ErrorKind::Other,
-        "schtasks sonucu doğrulanamadı (görev durumu değişmedi)",
+        "could not verify schtasks result (task state did not change)",
     ))
 }
 
-/// `schtasks`'ı UAC ile yükseltip çalıştır (gizli pencere).
+/// Run `schtasks` elevated via UAC (hidden window).
 fn run_elevated(file: &str, params: &str) -> io::Result<()> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::UI::Shell::ShellExecuteW;
@@ -61,13 +61,13 @@ fn run_elevated(file: &str, params: &str) -> io::Result<()> {
     let file = HSTRING::from(file);
     let params = HSTRING::from(params);
     let h = unsafe { ShellExecuteW(None, &verb, &file, &params, PCWSTR::null(), SW_HIDE) };
-    // ShellExecuteW: HINSTANCE > 32 => başarı.
+    // ShellExecuteW: HINSTANCE > 32 => success.
     if h.0 as isize > 32 {
         Ok(())
     } else {
         Err(io::Error::new(
             io::ErrorKind::Other,
-            "yükseltme başarısız (UAC reddedilmiş olabilir)",
+            "elevation failed (UAC may have been declined)",
         ))
     }
 }

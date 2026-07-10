@@ -1,6 +1,6 @@
-//! Enjeksiyon katmanı: bir `KeyEvent`'i işletim sistemine bas.
+//! Injection layer: press a `KeyEvent` into the operating system.
 //!
-//! Windows'ta gerçek `SendInput` (scancode). Windows dışında dry-run (yazdır).
+//! Real `SendInput` (scancode) on Windows. Dry-run (print) elsewhere.
 
 use protocol::{InputEvent, KeyEvent, MsgType};
 
@@ -18,11 +18,11 @@ mod win_inject {
         MOUSEEVENTF_WHEEL, VIRTUAL_KEY,
     };
 
-    // Windows tekerlek "bir tık" birimi (WindowsAndMessaging::WHEEL_DELTA ile aynı).
-    // Ekstra Cargo feature'ı gerektirmemek için gömülü.
+    // Windows wheel "one notch" unit (same as WindowsAndMessaging::WHEEL_DELTA).
+    // Inlined to avoid pulling in an extra Cargo feature.
     const WHEEL_DELTA: i32 = 120;
 
-    /// Tek bir scancode olayını (bas/bırak) SendInput ile gönder.
+    /// Send a single scancode event (press/release) via SendInput.
     pub fn send_scancode(scan: u16, key_up: bool, extended: bool) {
         let mut flags: KEYBD_EVENT_FLAGS = KEYEVENTF_SCANCODE;
         if key_up {
@@ -48,11 +48,11 @@ mod win_inject {
         let inputs = [input];
         let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
         if sent as usize != inputs.len() {
-            eprintln!("SendInput {}/{} olay ekledi (girdi engellendi mi?)", sent, inputs.len());
+            eprintln!("SendInput queued {}/{} events (input blocked?)", sent, inputs.len());
         }
     }
 
-    /// Tek bir fare INPUT'u kur + gönder (send_scancode'un fare karşılığı).
+    /// Build + send a single mouse INPUT (mouse counterpart of send_scancode).
     fn send_mouse(dx: i32, dy: i32, mouse_data: u32, flags: MOUSE_EVENT_FLAGS) {
         let input = INPUT {
             r#type: INPUT_MOUSE,
@@ -70,16 +70,17 @@ mod win_inject {
         let inputs = [input];
         let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
         if sent as usize != inputs.len() {
-            eprintln!("SendInput fare {}/{} (UIPI/engellendi?)", sent, inputs.len());
+            eprintln!("SendInput mouse {}/{} (UIPI/blocked?)", sent, inputs.len());
         }
     }
 
-    /// RELATİF hareket. MOUSEEVENTF_ABSOLUTE ayarlanmaz -> dx/dy relatif delta (sağ/aşağı +).
+    /// RELATIVE movement. MOUSEEVENTF_ABSOLUTE is not set -> dx/dy are relative deltas
+    /// (right/down positive).
     pub fn move_relative(dx: i32, dy: i32) {
         send_mouse(dx, dy, 0, MOUSEEVENTF_MOVE);
     }
 
-    /// Tek buton geçişi (edge). button: 0=L,1=R,2=M.
+    /// Single button transition (edge). button: 0=L,1=R,2=M.
     pub fn button(button: u8, down: bool) {
         let flag = match (button, down) {
             (0, true) => MOUSEEVENTF_LEFTDOWN,
@@ -88,12 +89,12 @@ mod win_inject {
             (1, false) => MOUSEEVENTF_RIGHTUP,
             (2, true) => MOUSEEVENTF_MIDDLEDOWN,
             (2, false) => MOUSEEVENTF_MIDDLEUP,
-            _ => return, // bilinmeyen buton: yok say
+            _ => return, // unknown button: ignore
         };
         send_mouse(0, 0, 0, flag);
     }
 
-    /// Scroll. dy>0 yukarı/ileri, dx>0 sağa. Dikey ve yatay AYRI INPUT'lardır.
+    /// Scroll. dy>0 up/forward, dx>0 right. Vertical and horizontal are SEPARATE INPUTs.
     pub fn scroll(dx: i8, dy: i8) {
         if dy != 0 {
             let delta = dy as i32 * WHEEL_DELTA;
@@ -106,17 +107,17 @@ mod win_inject {
     }
 }
 
-/// Gelen bir tuş olayını işle: HID usage -> scancode çevir, sonra bas.
+/// Handle an incoming key event: translate HID usage -> scancode, then press it.
 pub fn handle(ev: KeyEvent) {
     let (scan, extended) = match scancode::hid_to_scancode(ev.hid_usage) {
         Some(v) => v,
         None => {
-            eprintln!("eşleme yok: hid=0x{:04x} ({:?})", ev.hid_usage, ev.msg);
+            eprintln!("no mapping: hid=0x{:04x} ({:?})", ev.hid_usage, ev.msg);
             return;
         }
     };
 
-    // Down/Repeat -> tuş basılı; Up -> tuş bırakıldı.
+    // Down/Repeat -> key pressed; Up -> key released.
     let key_up = matches!(ev.msg, MsgType::Up);
 
     #[cfg(windows)]
@@ -132,7 +133,7 @@ pub fn handle(ev: KeyEvent) {
     }
 }
 
-/// Gelen bir fare olayını işle. Windows'ta SendInput; dışında dry-run.
+/// Handle an incoming mouse event. SendInput on Windows; dry-run elsewhere.
 pub fn handle_mouse(ev: InputEvent) {
     #[cfg(windows)]
     {
@@ -140,15 +141,15 @@ pub fn handle_mouse(ev: InputEvent) {
             InputEvent::MouseMove { dx, dy } => win_inject::move_relative(dx as i32, dy as i32),
             InputEvent::MouseButton { button, down } => win_inject::button(button, down),
             InputEvent::Scroll { dx, dy } => win_inject::scroll(dx, dy),
-            InputEvent::Key(_) => {} // Key bu yola gelmez; main.rs ayırır
+            InputEvent::Key(_) => {} // Key never takes this path; serve.rs routes it to handle()
         }
     }
     #[cfg(not(windows))]
     {
         match ev {
-            InputEvent::MouseMove { dx, dy } => println!("[dry-run] fare move dx={dx} dy={dy}"),
+            InputEvent::MouseMove { dx, dy } => println!("[dry-run] mouse move dx={dx} dy={dy}"),
             InputEvent::MouseButton { button, down } => {
-                println!("[dry-run] fare button={button} down={down}")
+                println!("[dry-run] mouse button={button} down={down}")
             }
             InputEvent::Scroll { dx, dy } => println!("[dry-run] scroll dx={dx} dy={dy}"),
             InputEvent::Key(_) => {}

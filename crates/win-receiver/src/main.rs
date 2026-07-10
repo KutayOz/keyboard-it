@@ -1,9 +1,11 @@
-//! win-receiver: Mac'ten şifreli tuş/fare olayları alıp Windows'a SendInput ile basar.
+//! win-receiver: receives encrypted key/mouse events from the Mac and injects them into
+//! Windows via SendInput.
 //!
-//! Windows'ta **Slint** tabanlı sistem tepsisi + küçük ayar penceresiyle çalışır (`gui`);
-//! ağ döngüsü (`serve`) arka thread'de, GUI'den Başlat/Durdur edilebilir. Ayarlar (anahtar,
-//! peer IP/port) GUI'den girilir; artık config dosyası/Notepad açılmaz. Windows DIŞINDA
-//! (macOS dry-run testi) tepsi yoktur, `serve` doğrudan çalışır.
+//! On Windows it runs a **Slint** system tray plus a small settings window (`gui`); the
+//! network loop (`serve`) runs on a background thread and can be started/stopped from the
+//! GUI. Settings (key, peer IP/port) are edited in the GUI; no config file/editor is
+//! opened. Outside Windows (macOS dry-run testing) there is no tray and `serve` runs
+//! directly.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io;
@@ -17,33 +19,34 @@ mod autostart;
 mod gui;
 
 fn main() -> io::Result<()> {
-    // Bozuk config.toml'da sessizce ölme (release'te konsol yok → çift tıklama
-    // "hiçbir şey olmuyor" gibi görünürdü): varsayılanlara düş, hatayı GUI'ye taşı.
+    // Do not die silently on a broken config.toml (release builds have no console, so a
+    // double-click would look like nothing happened): fall back to defaults and surface
+    // the error in the GUI.
     let (cfg, cfg_err) = match protocol::config::Config::load() {
         Ok(c) => (c.unwrap_or_default(), None),
         Err(e) => (
             protocol::config::Config::default(),
-            Some(format!("config.toml okunamadı, varsayılanlar yüklendi: {e}")),
+            Some(format!("could not read config.toml, defaults loaded: {e}")),
         ),
     };
 
     #[cfg(windows)]
     {
         if !single_instance() {
-            return Ok(()); // zaten çalışıyor
+            return Ok(()); // already running
         }
         gui::run(cfg, cfg_err)
     }
     #[cfg(not(windows))]
     {
         if let Some(w) = &cfg_err {
-            eprintln!("uyarı: {w}");
+            eprintln!("warning: {w}");
         }
         serve::serve(&cfg, |_| {})
     }
 }
 
-/// Tek örnek koruması: adlandırılmış mutex. Zaten varsa `false` döner.
+/// Single-instance guard: a named mutex. Returns `false` if one already exists.
 #[cfg(windows)]
 fn single_instance() -> bool {
     use windows::core::w;
@@ -51,9 +54,10 @@ fn single_instance() -> bool {
     use windows::Win32::System::Threading::CreateMutexW;
     unsafe {
         match CreateMutexW(None, false, w!("Local\\keyboard-it-singleton")) {
-            // Handle kapatılmaz (HANDLE Drop değil) → mutex süreç ömrü boyunca yaşar.
+            // The handle is never closed (HANDLE is not Drop) → the mutex lives as long
+            // as the process.
             Ok(_h) => GetLastError() != ERROR_ALREADY_EXISTS,
-            Err(_) => true, // mutex kurulamadıysa engelleme
+            Err(_) => true, // if the mutex cannot be created, do not block startup
         }
     }
 }

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""keyboard-it app ikonu üretici — Mac + Windows (bağımlılık: Pillow).
+"""keyboard-it app icon generator — Mac + Windows (dependency: Pillow).
 
-1024px bir ana logo çizer (gradyan rounded-square + klavye + yönlendirme oku),
-tek kaynaktan HER İKİ platformun ikonlarını üretir.
+Draws a 1024px master logo (gradient rounded square + keyboard + direction arrow)
+and produces the icons for BOTH platforms from that single source.
 
-Kullanım:
+Usage:
     python3 packaging/mac/make_icon.py
-Çıktı (Mac):
-    crates/mac-sender/assets/keyboard-it.png    (1024 ana logo)
+Output (Mac):
+    crates/mac-sender/assets/keyboard-it.png    (1024px master logo)
     crates/mac-sender/assets/keyboard-it.icns   (.iconset -> iconutil)
-Çıktı (Windows):
-    crates/win-receiver/ui/app.ico              (16..256 çok boyutlu exe/msi ikonu)
-    crates/win-receiver/ui/tray.png             (64px sistem tepsisi ikonu)
+Output (Windows):
+    crates/win-receiver/ui/app.ico              (multi-size 16..256 exe/msi icon)
+    crates/win-receiver/ui/tray.png             (64px system tray icon)
 """
 import os
 import subprocess
@@ -22,10 +22,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 ASSETS = os.path.join(ROOT, "crates", "mac-sender", "assets")
 
-S = 1024                      # ana çözünürlük
+S = 1024                      # master resolution
 BG_TOP = (79, 70, 229)        # indigo  #4f46e5
 BG_BOT = (6, 182, 212)        # cyan    #06b6d4
-KEY = (99, 102, 241)          # klavye tuşları  #6366f1
+KEY = (99, 102, 241)          # keyboard keys  #6366f1
 WHITE = (255, 255, 255, 255)
 
 
@@ -41,7 +41,7 @@ def rounded_mask(size, radius):
 
 
 def make_master():
-    # Dikey gradyan zemin.
+    # Vertical gradient background.
     grad = Image.new("RGB", (S, S), BG_TOP)
     px = grad.load()
     for y in range(S):
@@ -49,29 +49,29 @@ def make_master():
         for x in range(S):
             px[x, y] = c
 
-    # Rounded-square (macOS tarzı) maske ile transparan zemine oturt.
+    # Composite onto a transparent canvas through a rounded-square (macOS-style) mask.
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     img.paste(grad, (0, 0), rounded_mask(S, radius=228))
 
     d = ImageDraw.Draw(img, "RGBA")
 
-    # --- Yönlendirme oku (klavyeden "öteki ekrana" gönderim hissi) ---
-    # Sağ-üste doğru kalın beyaz ok; ok başı tek temiz üçgen.
+    # --- Direction arrow (suggests sending from the keyboard to "the other screen") ---
+    # Thick white arrow toward the top right; the head is a single clean triangle.
     d.line([(300, 380), (650, 310)], fill=WHITE, width=52, joint="curve")
     d.polygon([(735, 292), (653, 370), (631, 248)], fill=WHITE)
 
-    # --- Klavye gövdesi ---
+    # --- Keyboard body ---
     bx0, by0, bx1, by1 = 232, 470, 792, 800
     d.rounded_rectangle([bx0, by0, bx1, by1], radius=64, fill=WHITE)
 
-    # Tuş ızgarası (klavye üstünde indigo tuşlar).
+    # Key grid (indigo keys on the keyboard body).
     pad = 46
     gap = 26
     cols, rows = 6, 3
     inner_x0 = bx0 + pad
     inner_y0 = by0 + pad
     inner_x1 = bx1 - pad
-    inner_y1 = by1 - pad - 70            # en alt sıra "space" için yer
+    inner_y1 = by1 - pad - 70            # leave room for the bottom "space" row
     kw = (inner_x1 - inner_x0 - gap * (cols - 1)) / cols
     kh = (inner_y1 - inner_y0 - gap * (rows - 1)) / rows
     for r in range(rows):
@@ -92,9 +92,9 @@ def main():
     master = make_master()
     master_png = os.path.join(ASSETS, "keyboard-it.png")
     master.save(master_png)
-    print("yazıldı:", master_png)
+    print("wrote:", master_png)
 
-    # .iconset klasörü + tüm boyutlar.
+    # .iconset directory + every required size.
     iconset = os.path.join(ASSETS, "keyboard-it.iconset")
     os.makedirs(iconset, exist_ok=True)
     specs = [
@@ -109,24 +109,24 @@ def main():
 
     icns = os.path.join(ASSETS, "keyboard-it.icns")
     subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns], check=True)
-    print("yazıldı:", icns)
+    print("wrote:", icns)
 
-    # --- Windows: app.ico (çok boyutlu) + tray.png ---
+    # --- Windows: app.ico (multi-size) + tray.png ---
     win_ui = os.path.join(ROOT, "crates", "win-receiver", "ui")
     os.makedirs(win_ui, exist_ok=True)
 
-    # ICO: 16..256 boyutlarını LANCZOS ile önceden üret, hepsini tek .ico'ya göm.
+    # ICO: pre-render the 16..256 sizes with LANCZOS and embed them all in one .ico.
     ico_sizes = [256, 128, 64, 48, 32, 24, 16]
     frames = [master.resize((s, s), Image.LANCZOS) for s in ico_sizes]
     ico_path = os.path.join(win_ui, "app.ico")
     frames[0].save(ico_path, format="ICO", sizes=[(s, s) for s in ico_sizes],
                    append_images=frames[1:])
-    print("yazıldı:", ico_path)
+    print("wrote:", ico_path)
 
-    # Sistem tepsisi (Slint SystemTrayIcon): 64px; Windows küçük DPI'lere ölçekler.
+    # System tray (Slint SystemTrayIcon): 64px; Windows scales it down for small DPIs.
     tray_path = os.path.join(win_ui, "tray.png")
     master.resize((64, 64), Image.LANCZOS).save(tray_path)
-    print("yazıldı:", tray_path)
+    print("wrote:", tray_path)
 
 
 if __name__ == "__main__":

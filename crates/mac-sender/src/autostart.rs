@@ -1,31 +1,31 @@
-//! macOS oturum-açılışı otomatik başlatma — LaunchAgent plist (launchctl ÇAĞRILMAZ).
+//! macOS login autostart — LaunchAgent plist (launchctl is NOT called).
 //!
-//! Windows'taki `autostart.rs`nin (Zamanlanmış Görev) macOS karşılığı. Kullanıcının
-//! `~/Library/LaunchAgents/` dizinine bir plist yazar; oturum açılışında `RunAtLoad`
-//! ile mevcut .app ikili yolunu (std::env::current_exe) başlatır. Yükseltme (admin)
-//! GEREKMEZ — LaunchAgent kullanıcı bağlamında çalışır (Erişilebilirlik izni yeter).
+//! macOS counterpart of the Windows `autostart.rs` (Scheduled Task). Writes a plist into
+//! the user's `~/Library/LaunchAgents/`; at login, `RunAtLoad` launches the current .app
+//! binary path (std::env::current_exe). No elevation (admin) needed — a LaunchAgent runs
+//! in the user context (the Accessibility permission suffices).
 
 use std::io;
 use std::path::PathBuf;
 
-/// LaunchAgent etiketi — config bundle id ile aynı ailede.
+/// LaunchAgent label — same family as the config bundle id.
 const LABEL: &str = "com.keyboard-it.keyboard-it";
 
 /// ~/Library/LaunchAgents/com.keyboard-it.keyboard-it.plist
 fn plist_path() -> io::Result<PathBuf> {
     let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME ayarlı değil"))?;
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
     Ok(PathBuf::from(home)
         .join("Library/LaunchAgents")
         .join(format!("{LABEL}.plist")))
 }
 
-/// LaunchAgent kurulu mu? (plist var mı)
+/// Is the LaunchAgent installed? (does the plist exist)
 pub fn is_enabled() -> bool {
     plist_path().map(|p| p.exists()).unwrap_or(false)
 }
 
-/// Oto-başlatmayı aç/kapat. İstenen durumda zaten ise no-op sayılır (idempotent).
+/// Enable/disable autostart. No-op when already in the requested state (idempotent).
 pub fn set_enabled(on: bool) -> io::Result<()> {
     let path = plist_path()?;
     if on {
@@ -56,13 +56,13 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
             exe = exe.display()
         );
         std::fs::write(&path, plist)?;
-        // launchctl load/unload ÇAĞRILMAZ (bulgu düzeltmesi): uygulama LaunchAgent'tan
-        // başladıysa kendi launchd job'ıdır — unload çalışan sürecin KENDİSİNİ SIGTERM
-        // ile öldürüyordu. RunAtLoad zaten yalnız oturum açılışında değerlendirilir;
-        // plist'i yazmak yeter, çalışan örneğe dokunulmaz.
+        // launchctl load/unload is NOT called: when the app was started from the
+        // LaunchAgent it IS that launchd job — unload would SIGTERM the running process
+        // itself. RunAtLoad is only evaluated at login; writing the plist is enough and
+        // the running instance is untouched.
     } else if path.exists() {
-        // Yalnızca plist'i sil — unload etme: kendi job'ımızsak süreç anında ölür,
-        // applicationWillTerminate temizliği (imleci geri bağlama) çalışmazdı.
+        // Only delete the plist — no unload: if this process is its own job it would die
+        // instantly, skipping the applicationWillTerminate cleanup (cursor re-association).
         std::fs::remove_file(&path)?;
     }
     Ok(())

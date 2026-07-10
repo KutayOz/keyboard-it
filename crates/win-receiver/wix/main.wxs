@@ -58,8 +58,8 @@
 
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
-    <!-- Kullanıcıya görünen ürün adı 'keyboard-it' (Mac tarafı ve siteyle aynı marka);
-         exe adı win-receiver.exe olarak kalır. UpgradeCode ASLA değişmez. -->
+    <!-- User-visible product name is 'keyboard-it' (same brand as the Mac side);
+         the exe name stays win-receiver.exe. UpgradeCode NEVER changes. -->
     <Product
         Id='*'
         Name='keyboard-it'
@@ -71,7 +71,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='keyboard-it alıcı — Mac&#39;ten şifreli tuş/fare olaylarını Windows&#39;a enjekte eder (tepsi + ayar penceresi)'
+            Description='keyboard-it receiver — injects encrypted key/mouse events from a Mac into Windows (tray + settings window)'
             Manufacturer='KutayOz'
             InstallerVersion='450'
             Languages='1033'
@@ -80,9 +80,10 @@
             SummaryCodepage='1252'
             />
 
-        <!-- AllowSameVersionUpgrades: sürüm bump'lanmadan yeniden dağıtılan MSI de
-             (ör. 0.1.0 üstüne 0.1.0) eskisini söküp dosyaları tazeler; yoksa yeni
-             kurulum eskinin YANINA kurulur ve eski exe çalışmaya devam eder. -->
+        <!-- AllowSameVersionUpgrades: an MSI redeployed without a version bump
+             (e.g. 0.1.0 over 0.1.0) also removes the old install and refreshes the
+             files; without it the new install lands NEXT TO the old one and the old
+             exe keeps running. -->
         <MajorUpgrade
             Schedule='afterInstallInitialize'
             AllowSameVersionUpgrades='yes'
@@ -138,18 +139,18 @@
                 </Directory>
             </Directory>
 
-            <!-- Başlat menüsü klasörü (kısayol için) -->
+            <!-- Start menu folder (for the shortcut) -->
             <Directory Id='ProgramMenuFolder'>
                 <Directory Id='AppShortcutFolder' Name='keyboard-it'/>
             </Directory>
         </Directory>
 
-        <!-- Başlat menüsü kısayolu -->
+        <!-- Start menu shortcut -->
         <DirectoryRef Id='AppShortcutFolder'>
             <Component Id='AppShortcut' Guid='*'>
                 <Shortcut Id='StartMenuShortcut'
                           Name='keyboard-it'
-                          Description='keyboard-it — Mac tuş/fare alıcısı'
+                          Description='keyboard-it — Mac key/mouse receiver'
                           Target='[#exe0]'
                           WorkingDirectory='Bin'/>
                 <RemoveFolder Id='RemoveAppShortcutFolder' Directory='AppShortcutFolder' On='uninstall'/>

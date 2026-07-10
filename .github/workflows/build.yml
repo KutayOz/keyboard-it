@@ -1,15 +1,15 @@
 name: build
 
-# Bulutta derleme/paketleme: fiziksel Windows/Mac gerekmeden .msi + .dmg üretir.
-# - workflow_dispatch: elle tetikle (gh workflow run build.yml)
-# - tag v* : ayrıca bir GitHub Release oluşturup installer'ları ekler
+# Cloud build/packaging: produces the .msi + .dmg without physical Windows/Mac machines.
+# - workflow_dispatch: manual trigger (gh workflow run build.yml)
+# - tag v*: additionally creates a GitHub Release with the installers attached
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
 
 jobs:
-  # Hızlı, ucuz doğrulama (Linux): tüm workspace derlenir + testler.
+  # Fast, cheap validation (Linux): compile the whole workspace + run tests.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -18,14 +18,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --verbose
 
-  # macOS: release derle -> keyboard-it.app -> .dmg (native package.sh).
+  # macOS: release build -> keyboard-it.app -> .dmg (native package.sh).
   macos:
     runs-on: macos-14 # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: .app + .dmg paketle
+      - name: Package .app + .dmg
         run: bash packaging/mac/package.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -33,23 +33,24 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
-  # Windows: ÖNCE win-receiver'ı derle (Slint/tepsi kodunun derlendiğini doğrular),
-  # SONRA cargo-wix ile .msi paketle. WiX v3 windows runner'ında hazır gelir.
+  # Windows: build win-receiver FIRST (verifies the Slint/tray code compiles),
+  # THEN package the .msi with cargo-wix. WiX v3 ships preinstalled on the windows runner.
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: win-receiver derle (Slint compile-check)
+      - name: Build win-receiver (Slint compile check)
         run: cargo build --release -p win-receiver
-      - name: cargo-wix kur
+      - name: Install cargo-wix
         run: cargo install cargo-wix --locked
-      - name: .msi paketle
+      - name: Package .msi
         run: cargo wix --package win-receiver --no-build --nocapture
-      # cargo-wix çıktı adını paket adından türetir (win-receiver-<sürüm>-x86_64.msi);
-      # dmg ve site linkiyle aynı ürün adını taşısın diye keyboard-it-<sürüm>-x64.msi yap.
-      - name: .msi'yi ürün adına çevir
+      # cargo-wix derives the output name from the package name (win-receiver-<version>-x86_64.msi);
+      # rename to keyboard-it-<version>-x64.msi so it carries the same product name as the dmg
+      # and the site links.
+      - name: Rename .msi to product name
         shell: pwsh
         run: Get-Item target/wix/*.msi | Rename-Item -NewName { $_.Name -replace '^win-receiver','keyboard-it' -replace 'x86_64','x64' }
       - uses: actions/upload-artifact@v4
@@ -58,7 +59,7 @@ jobs:
           path: target/wix/*.msi
           if-no-files-found: error
 
-  # Yalnızca v* tag'inde: installer'ları bir Release'e ekle.
+  # Only on v* tags: attach the installers to a Release.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [macos, windows]
@@ -69,9 +70,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      # Sitedeki 'releases/latest/download/<sabit-ad>' linkleri sürümden bağımsız
-      # çalışsın: sürümlü dosyaların YANINA sabit adlı kopyalar da eklenir.
-      - name: Sabit adlı kopyalar (latest/download linkleri için)
+      # Keep the site's 'releases/latest/download/<fixed-name>' links version-independent:
+      # upload fixed-name copies ALONGSIDE the versioned files.
+      - name: Fixed-name copies (for latest/download links)
         run: |
           mkdir -p latest
           cp artifacts/macos-dmg/keyboard-it-*.dmg latest/keyboard-it-macos.dmg

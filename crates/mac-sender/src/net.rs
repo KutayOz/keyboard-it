@@ -1,26 +1,27 @@
-//! Ortak ağ yardımcısı: win-receiver'a bağlan (kısa tekrar denemeli).
+//! Shared network helper: connect to win-receiver (with short retries).
 
 use std::io;
 use std::net::TcpStream;
 use std::thread::sleep;
 use std::time::Duration;
 
-/// Adrese bağlanmayı ~4 sn boyunca dener (win-receiver henüz ayakta olmayabilir).
+/// Tries to connect to the address for ~4 s (win-receiver may not be up yet).
 pub fn connect_retry(addr: &str) -> io::Result<TcpStream> {
     let mut last_err = None;
     for _ in 0..40 {
         match TcpStream::connect(addr) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
-                // Sessiz kopmalarda sonsuz bloklamayı önle: el sıkışma yanıtı (read)
-                // ve gönderim (write) en çok ~10 sn beklesin. Timeout'ta send/handshake
-                // Err döner, çağıran bağlantıyı kapatıp yeniden dener (bulgu düzeltmesi).
+                // Avoid blocking forever on silent drops: cap the handshake response
+                // (read) and sends (write) at ~10 s. On timeout, send/handshake return
+                // Err and the caller closes the connection and retries.
                 let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
                 let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
-                // Ölü peer algılama: TCP keepalive — win-receiver serve.rs ile AYNI
-                // ayarlar (5 sn boşta + 3 sn aralıklı sonda). Mac uyur/Wi-Fi düşerse
-                // (yarı-açık bağlantı, RST/EOF gelmez) gönderici de ~15 sn içinde
-                // hata görüp reconnect'e düşer (protokol-ping'siz çözümün bu yarısı).
+                // Dead-peer detection: TCP keepalive with the SAME settings as
+                // win-receiver serve.rs (5 s idle + probes every 3 s). If the Mac sleeps
+                // or Wi-Fi drops (half-open connection, no RST/EOF arrives), the sender
+                // also sees an error within ~15 s and falls back to reconnecting (this
+                // is the sender half of the no-protocol-ping solution).
                 {
                     use socket2::{SockRef, TcpKeepalive};
                     let ka = TcpKeepalive::new()
@@ -36,5 +37,5 @@ pub fn connect_retry(addr: &str) -> io::Result<TcpStream> {
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "bağlanılamadı")))
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "connect failed")))
 }

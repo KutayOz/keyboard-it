@@ -2,26 +2,26 @@
 name = "win-receiver"
 version.workspace = true
 edition = "2021"
-description = "keyboard-it alıcı — Mac'ten şifreli tuş/fare olaylarını Windows'a enjekte eder (tepsi + ayar penceresi)"
+description = "keyboard-it receiver — injects encrypted key/mouse events from a Mac into Windows (tray + settings window)"
 authors = ["KutayOz"]
 
 [dependencies]
 protocol = { path = "../protocol" }
-socket2 = "0.5"   # TCP keepalive — ölü/yarı-açık bağlantı algılama (serve.rs)
+socket2 = "0.5"   # TCP keepalive — dead/half-open connection detection (serve.rs)
 
-# windows/tray-icon/tao YALNIZCA Windows hedefinde çözülür/derlenir.
-# macOS'ta bu blok yok sayılır (Mac build'i bunları çekmez).
+# windows/slint are resolved/compiled ONLY on the Windows target.
+# macOS builds ignore this block entirely.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Foundation",
-    "Win32_System_Threading",       # CreateMutexW — tek örnek (single instance)
-    "Win32_Security",               # SECURITY_ATTRIBUTES (CreateMutexW imzası)
-    "Win32_UI_Shell",               # ShellExecuteW — schtasks'ı yükseltip çalıştır
+    "Win32_System_Threading",       # CreateMutexW — single instance
+    "Win32_Security",               # SECURITY_ATTRIBUTES (CreateMutexW signature)
+    "Win32_UI_Shell",               # ShellExecuteW — run schtasks elevated
     "Win32_UI_WindowsAndMessaging",
 ] }
 slint = "1.17"
 
 [target.'cfg(windows)'.build-dependencies]
 slint-build = "1.17"
-winresource = "0.1"   # exe ikonu + sürüm bilgisini göm
+winresource = "0.1"   # embed the exe icon + version info
