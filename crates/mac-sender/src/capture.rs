@@ -8,6 +8,8 @@
 //! İZİNLER (ikisi de gerekli):
 //!   - Giriş İzleme (Input Monitoring): olayları görmek için.
 //!   - Erişilebilirlik (Accessibility): AKTİF iken tuşları bastırmak (Drop) için.
+//! İlk çalıştırmada ikisi de SİSTEMİN RESMİ istemleriyle istenir
+//! (request_permissions_official — preflight sayesinde izin varsa istem çıkmaz).
 //! ÖN KOŞUL: Sistem Ayarları > Klavye > "🌐/fn tuşuna basınca: Hiçbir şey yapma"
 //!   (yoksa macOS çift-Fn'i Dikte için yer ve toggle'ı yiyebilir).
 //!
@@ -53,6 +55,66 @@ const DOUBLE_TAP: Duration = Duration::from_millis(400);
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
+}
+
+// İlk çalıştırma izin akışı (macOS 10.15+): Preflight, Giriş İzleme iznini
+// İSTEMSİZ yoklar (varsa true). Request, Apple'ın RESMİ izin diyaloğunu gösterir
+// VE uygulamayı Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme listesine
+// otomatik ekler — kullanıcı uygulamayı elle aramak zorunda kalmaz.
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
+}
+
+/// Erişilebilirlik (Accessibility) izni: kAXTrustedCheckOptionPrompt=true ile
+/// çağrıldığında izin YOKSA Apple'ın resmi sistem diyaloğu çıkar ve uygulama
+/// Erişilebilirlik listesine otomatik eklenir; izin ZATEN varsa hiçbir diyalog
+/// çıkmadan true döner.
+fn ax_trusted_with_prompt() -> bool {
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+    use core_foundation::string::{CFString, CFStringRef};
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        #[allow(non_upper_case_globals)]
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+    unsafe {
+        // Get-rule: sistem sabitinin sahipliği bizde değil, retain edilir.
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let opts = CFDictionary::from_CFType_pairs(&[(
+            key.as_CFType(),
+            CFBoolean::true_value().as_CFType(),
+        )]);
+        AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef())
+    }
+}
+
+/// İzinleri sistemin RESMİ istemleriyle iste (tap kurulmadan ÖNCE çağrılır).
+/// İki istemi AYNI ANDA patlatmamak için sıralama:
+///   - Giriş İzleme yoksa: yalnız onu iste (Apple diyaloğu). Erişilebilirlik
+///     istemi bir SONRAKİ açılışa kalır — izin sonrası uygulamayı yeniden açmak
+///     zaten gerekiyor (CGEventTap izni süreç başında değerlendirir).
+///   - Giriş İzleme varsa: Erişilebilirlik eksikse onun resmi istemini göster.
+/// İki izin de ZATEN verilmişse hiçbir diyalog çıkmaz (preflight bunun için).
+fn request_permissions_official() {
+    let listen_ok = unsafe { CGPreflightListenEventAccess() };
+    if !listen_ok {
+        let _ = unsafe { CGRequestListenEventAccess() };
+        return;
+    }
+    let _ = ax_trusted_with_prompt();
+}
+
+/// Sistem Ayarları > Gizlilik ve Güvenlik > Giriş İzleme bölmesini doğrudan aç
+/// ('İzin gerekli' diyaloğundaki 'Ayarları Aç' butonu için).
+fn open_input_monitoring_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        .spawn();
 }
 
 /// Kanal kapasitesi: bağlantı kopukken callback'ten gelen olaylar bu sınırın
@@ -214,6 +276,11 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         last_fn_press: None,
         held: HashSet::new(),
     });
+
+    // İlk çalıştırma: tap kurulmadan ÖNCE izinleri sistemin resmi istemleriyle
+    // yokla/iste — izin zaten varsa hiçbir diyalog çıkmaz, yoksa Apple'ın kendi
+    // diyaloğu çıkar ve uygulama ilgili izin listesine otomatik eklenir.
+    request_permissions_official();
 
     // Tap'in mach portu: callback TapDisabled* görünce CGEventTapEnable ile tap'i
     // YENİDEN açar (eskiden sadece stderr'e yazılıyor, toggle ölü kalıyordu —
@@ -430,15 +497,23 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         },
         Err(_) => {
             permission_needed.store(true, Ordering::Relaxed);
-            menubar::show_alert(
+            // İzin az önce resmi istemle verilmiş olsa bile CGEventTap için
+            // uygulamanın YENİDEN AÇILMASI gerekir — metin bunu söylüyor.
+            // 'Ayarları Aç' doğru bölmeyi (Giriş İzleme) doğrudan açar.
+            let open = menubar::show_setup_alert(
                 mtm,
                 "keyboard-it — izin gerekli",
-                "Klavye yakalama başlatılamadı.\n\n\
-                 Sistem Ayarları \u{2192} Gizlilik ve Güvenlik \u{2192} Giriş İzleme\n\
-                 (ve Erişilebilirlik) bölümünde keyboard-it'e izin ver,\n\
-                 sonra uygulamayı kapatıp YENİDEN AÇ.\n\n\
+                "Klavye yakalama başlatılamadı — izin eksik.\n\n\
+                 Az önce çıkan sistem isteminde izin verdiysen: macOS bu iznin\n\
+                 etkinleşmesi için uygulamanın kapatılıp YENİDEN AÇILMASINI ister.\n\n\
+                 İstem çıkmadıysa: Sistem Ayarları \u{2192} Gizlilik ve Güvenlik \u{2192}\n\
+                 Giriş İzleme (ve Erişilebilirlik) bölümünde keyboard-it'i AÇIK\n\
+                 konuma getir, sonra uygulamayı yeniden başlat.\n\n\
                  Uygulama menü çubuğunda 'İzin gerekli' olarak açık kalacak.",
             );
+            if open {
+                open_input_monitoring_settings();
+            }
             None
         }
     };

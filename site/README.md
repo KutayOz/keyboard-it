@@ -8,6 +8,13 @@ statik sürümü. Cloudflare Pages'e (veya herhangi bir statik host'a) olduğu g
   Claude Design'ın `support.js`/`DCLogic`'i düz JS'e, `style-hover`/`style-active`
   öznitelikleri gerçek CSS `:hover`/`:active`'e çevrildi.
 - `keyboard-it.png` — favicon + hero ikonu.
+- `install-macos.sh` — macOS için terminal kurulum betiği (`curl … | sh`).
+  curl indirmesi quarantine bayrağı taşımadığı için Gatekeeper uyarısı hiç çıkmaz;
+  DMG'yi indirir, mount eder, `.app`'i `/Applications`'a kopyalar ve açar.
+  `index.html`'deki "Alternatif: Terminal ile tek komut" kutusu bu dosyaya işaret eder.
+  **Deploy edilen domain değişirse** iki yer güncellenmeli: betiğin başındaki
+  `BASE_URL` değişkeni ve `index.html`'deki `curl -fsSL …/install-macos.sh | sh`
+  komutunun adresi.
 - `downloads/` — installer'lar. **Binary'ler git'e commit EDİLMEZ** (`.gitignore`);
   deploy'dan önce buraya koyulur.
 

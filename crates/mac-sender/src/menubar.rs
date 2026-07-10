@@ -90,8 +90,9 @@ pub fn show_alert(mtm: MainThreadMarker, title: &str, text: &str) {
     let _ = alert.runModal();
 }
 
-/// İlk-kurulum diyaloğu: 'Ayarları Aç' / 'Daha Sonra'. true = kullanıcı ayarları
-/// açmak istedi (çağıran Config::edit() ile config.toml'u editörde açar).
+/// İki butonlu diyalog: 'Ayarları Aç' / 'Daha Sonra'. true = kullanıcı ayarları
+/// açmak istedi; NE açılacağına çağıran karar verir (ilk kurulumda config.toml,
+/// izin diyaloğunda Sistem Ayarları > Giriş İzleme bölmesi).
 pub fn show_setup_alert(mtm: MainThreadMarker, title: &str, text: &str) -> bool {
     let app = NSApplication::sharedApplication(mtm);
     unsafe {
