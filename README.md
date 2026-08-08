@@ -90,8 +90,10 @@ normal cursor behavior.
 
 Run the `.msi`. SmartScreen flags the unsigned installer: click **More info → Run anyway**.
 The receiver runs in the system tray and starts listening on its own — there is nothing to
-configure before pairing. Allow it through the Windows firewall when prompted. Its settings
-window sets the port, toggles start-at-login, and can forget paired Macs.
+configure before pairing. The installer adds its own inbound firewall rule, so no Defender
+prompt should appear; if you installed by copying the `.exe` instead, answer **Allow** to
+the prompt on first launch. Its settings window sets the port, toggles start-at-login, and
+can forget paired Macs.
 
 ### Pairing
 
@@ -121,8 +123,9 @@ Other things worth knowing:
   and ignores repeat requests for a few seconds after you decline one.
 - Discovery uses mDNS (the same mechanism as AirPlay and printer discovery). On a network
   that blocks multicast, or with client isolation on, the PC will not show up. The TCP
-  port defaults to `5599`; the pairing listener uses `5600`. Allow keyboard-it through the
-  Windows firewall when prompted.
+  port defaults to `5599`; the pairing listener uses `5600`, or an ephemeral port if that
+  one is taken — which is why the installer's firewall rule covers the *program* rather
+  than a fixed port.
 
 ## Build from source
 
