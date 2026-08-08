@@ -260,7 +260,20 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let listener = listener.clone();
         let tw = tray.as_weak();
         let sw = settings.as_weak();
+        let pw = pair_win.as_weak();
+        let slot = answer.clone();
         Rc::new(move || {
+            // Decline anything already on screen FIRST. `stop()` joins the pairing accept
+            // loop but deliberately not the per-request threads, so without this a dialog
+            // raised a moment ago stays up and stays answerable: clicking Allow then hands
+            // the Mac a real key plus a session port that is no longer listening, and the
+            // status line claims "the Mac can connect now" while 5599 refuses the
+            // connection. A no-op when nothing is pending — `reply` only fires if a sender
+            // is still parked in the slot.
+            reply(&slot, false);
+            if let Some(w) = pw.upgrade() {
+                let _ = w.hide();
+            }
             let existing = listener.borrow_mut().take();
             if let Some(mut h) = existing {
                 h.stop();

@@ -96,6 +96,15 @@ export component PairRequestWindow inherits Window {
     title: "keyboard-it — pairing request";
     preferred-width: 340px;
     preferred-height: 250px;
+    // min-* is load-bearing, not belt-and-braces. With preferred-* alone this window
+    // opened at 178x261 on Windows 11 (measured): narrow enough that both paragraphs
+    // wrapped onto extra lines, so the content grew taller than the frame and the
+    // Allow/Deny row landed ~23px BELOW the bottom edge. The dialog looked fine and was
+    // impossible to answer — the only reachable affordances were the title-bar X and the
+    // 60s timeout, and both of those decline. The height carries slack on purpose so a
+    // 64-byte peer name wrapping to two or three lines still cannot push the buttons out.
+    min-width: 360px;
+    min-height: 340px;
     always-on-top: true;
 
     in property <string> peer-name;

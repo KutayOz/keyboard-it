@@ -56,7 +56,8 @@
     <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
 <?endif ?>
 
-<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:fw='http://schemas.microsoft.com/wix/FirewallExtension'>
 
     <!-- User-visible product name is 'keyboard-it' (same brand as the Mac side);
          the exe name stays win-receiver.exe. UpgradeCode NEVER changes. -->
@@ -133,7 +134,42 @@
                                 Name='win-receiver.exe'
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\win-receiver.exe'
-                                KeyPath='yes'/>
+                                KeyPath='yes'>
+
+                                <!--
+                                  Inbound firewall rule, created at install time.
+
+                                  Without it the app depends on the Windows Defender
+                                  "allow this app?" prompt at first launch, which is not a
+                                  reliable path: Windows writes inbound BLOCK rules the
+                                  moment the socket binds and only flips them to Allow if
+                                  the user answers Yes. Cancel it, miss it, or run on an
+                                  image with NotifyOnListen disabled, and the block is
+                                  permanent and silent — the app looks healthy and simply
+                                  cannot be reached. Measured on Windows 11 26200: the
+                                  prompt's own text promises "public and private networks"
+                                  but the rule it creates covers only the network profile
+                                  in use at the time, so moving between a Public and a
+                                  Private network breaks reachability with no new prompt.
+
+                                  No Port attribute on purpose — this is a PROGRAM rule.
+                                  The session port is user-editable in the settings window
+                                  and the pairing listener falls back to an ephemeral port
+                                  when its preferred one is taken, so pinning ports here
+                                  would silently stop covering the real listeners.
+
+                                  IgnoreFailure: a locked-down machine where rule creation
+                                  is refused must still install; the app degrades to the
+                                  prompt path rather than failing setup.
+                                -->
+                                <fw:FirewallException
+                                    Id='KeyboardItInbound'
+                                    Name='keyboard-it receiver'
+                                    Description='Lets a paired Mac reach the keyboard-it receiver on this PC (session + pairing listeners).'
+                                    Scope='any'
+                                    Profile='all'
+                                    IgnoreFailure='yes'/>
+                            </File>
                         </Component>
                     </Directory>
                 </Directory>
