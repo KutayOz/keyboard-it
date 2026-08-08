@@ -10,8 +10,9 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use protocol::pairing::{PairDecision, PairRequest};
 use protocol::{InputEvent, KeyEvent, MsgType};
 
 use crate::inject;
@@ -28,6 +29,19 @@ pub enum ConnStatus {
 }
 
 type OnConn = Arc<dyn Fn(ConnStatus) + Send + Sync>;
+
+/// Asks the user whether to accept a pairing request. BLOCKING by design: it is
+/// expected to put a dialog on screen and wait for a click (or time out into
+/// `false`). Returning `false` declines and the peer is told so.
+pub type PairDecide = Arc<dyn Fn(&PairRequest) -> bool + Send + Sync>;
+
+/// Handshake + name exchange must finish quickly; only the human decision is
+/// allowed to take its time, and that happens inside the callback with no I/O.
+const PAIR_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// After a decline, ignore further requests for a while so a host on the LAN
+/// cannot reopen the dialog in a loop.
+const PAIR_COOLDOWN: Duration = Duration::from_secs(10);
 
 /// Live connection slot: (generation, stream clone). The generation number keeps the
 /// thread of an OLD connection that dies late from clearing the record of the NEW
@@ -205,12 +219,183 @@ fn accept_loop(
     }
 }
 
-/// Advertise the listener over mDNS/DNS-SD so the Mac discovers this PC without the
-/// user reading IPs off `ipconfig`. Failure is NON-fatal — manual host entry on the
-/// Mac still works — so errors only go to the (debug-build) console.
-#[cfg(windows)]
-fn advertise_mdns(port: u16) -> Option<(mdns_sd::ServiceDaemon, String)> {
-    let host = crate::netinfo::hostname();
+/// Everything the pairing listener needs to answer a request. The secret is
+/// whatever the session listener is using, so a pairing hands over exactly the
+/// key that will work.
+struct PairCtx {
+    secret: String,
+    session_port: u16,
+    my_name: String,
+    decide: PairDecide,
+    /// True while a dialog is on screen. Gates the whole feature to one prompt
+    /// at a time: a second request is closed instead of queued.
+    busy: Arc<AtomicBool>,
+    /// Set after a decline, so a host on the LAN cannot reopen the dialog in a loop.
+    cooldown_until: Arc<Mutex<Option<Instant>>>,
+}
+
+/// This machine's name, as shown in the dialog on the Mac.
+fn this_device_name() -> String {
+    #[cfg(windows)]
+    {
+        crate::netinfo::hostname()
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "keyboard-it PC".to_string())
+    }
+}
+
+/// The literal pairing key to hand out. Config first, `KEYBOARD_IT_KEY` second —
+/// the same precedence `psk_from_config_or_env` uses, so a pairing can never
+/// hand over a key that differs from the one the session listener expects.
+fn secret_to_share(cfg: &protocol::config::Config) -> String {
+    if !cfg.shared_secret.is_empty() {
+        return cfg.shared_secret.clone();
+    }
+    std::env::var("KEYBOARD_IT_KEY").unwrap_or_default()
+}
+
+/// One pairing attempt. Returns true if the user accepted.
+fn handle_pair(mut stream: TcpStream, ctx: &PairCtx) -> bool {
+    let peer = stream.peer_addr().ok();
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(PAIR_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PAIR_IO_TIMEOUT));
+
+    let decide = ctx.decide.clone();
+    match protocol::pairing::pair_responder(
+        &mut stream,
+        &ctx.secret,
+        ctx.session_port,
+        &ctx.my_name,
+        |req| decide(req),
+    ) {
+        Ok(PairDecision::Accepted(req)) => {
+            println!("paired with {:?} ({peer:?})", req.peer_name);
+            true
+        }
+        Ok(PairDecision::Declined(req)) => {
+            println!("pairing declined for {:?} ({peer:?})", req.peer_name);
+            false
+        }
+        Err(e) => {
+            // Port scanners and half-open probes land here too, so this is not
+            // worth surfacing in the UI.
+            eprintln!("pairing attempt failed ({peer:?}): {e}");
+            false
+        }
+    }
+}
+
+/// Interruptible pairing accept loop.
+///
+/// The decision callback blocks on a human, so it must NOT run here: `stop()`
+/// joins this thread, and on Windows `stop()` is called from the very UI thread
+/// that has to service the dialog. Handling a request inline would deadlock the
+/// two against each other until the 60 s decision timeout expired. Each request
+/// therefore gets a detached thread, and this loop stays responsive to `stop`
+/// within ~100 ms.
+fn pair_accept_loop(listener: TcpListener, ctx: Arc<PairCtx>, stop: &Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                let cooling = ctx
+                    .cooldown_until
+                    .lock()
+                    .map(|t| t.is_some_and(|t| Instant::now() < t))
+                    .unwrap_or(false);
+                if cooling {
+                    eprintln!("pairing request from {peer:?} ignored (cooling down)");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                // swap, not store: whoever flips false->true owns the dialog.
+                if ctx.busy.swap(true, Ordering::SeqCst) {
+                    eprintln!("pairing request from {peer:?} ignored (already pairing)");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let ctx = ctx.clone();
+                thread::spawn(move || {
+                    let accepted = handle_pair(stream, &ctx);
+                    if !accepted {
+                        if let Ok(mut t) = ctx.cooldown_until.lock() {
+                            *t = Some(Instant::now() + PAIR_COOLDOWN);
+                        }
+                    }
+                    ctx.busy.store(false, Ordering::SeqCst);
+                });
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("pairing accept error: {e}");
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+}
+
+/// Bind the pairing listener and start its thread. Returns the port it actually
+/// got, so the caller can publish it over mDNS.
+///
+/// Failure is NON-fatal: an already-paired Mac keeps working, only new pairings
+/// are unavailable. Prefers `port + 1` (a stable, documentable number for a
+/// firewall rule) and falls back to an ephemeral port so a clash can never stop
+/// the app from starting.
+fn start_pair_listener(
+    cfg: &protocol::config::Config,
+    decide: PairDecide,
+) -> Option<(u16, Arc<AtomicBool>, JoinHandle<()>)> {
+    let secret = secret_to_share(cfg);
+    if secret.is_empty() {
+        eprintln!("pairing disabled: no pairing key to hand out");
+        return None;
+    }
+    let preferred = protocol::default_pairing_port(cfg.port);
+    let listener = TcpListener::bind(("0.0.0.0", preferred))
+        .or_else(|e| {
+            eprintln!("pairing port {preferred} unavailable ({e}); falling back to an ephemeral port");
+            TcpListener::bind(("0.0.0.0", 0))
+        })
+        .ok()?;
+    let port = listener.local_addr().ok()?.port();
+    if listener.set_nonblocking(true).is_err() {
+        return None;
+    }
+    println!("pairing listener on 0.0.0.0:{port}");
+
+    let ctx = Arc::new(PairCtx {
+        secret,
+        session_port: cfg.port,
+        my_name: this_device_name(),
+        decide,
+        busy: Arc::new(AtomicBool::new(false)),
+        cooldown_until: Arc::new(Mutex::new(None)),
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = stop.clone();
+    let thread = thread::spawn(move || pair_accept_loop(listener, ctx, &s));
+    Some((port, stop, thread))
+}
+
+/// Advertise the listener over mDNS/DNS-SD. This is the ONLY way the Mac learns
+/// this PC exists — there is no manual address entry any more — so a failure
+/// here means "invisible", not "degraded". Still non-fatal: an already-paired
+/// Mac reconnects from its stored config regardless.
+///
+/// Deliberately not `#[cfg(windows)]`: the macOS dry-run has to be discoverable
+/// too, or the whole pairing flow cannot be exercised on one machine.
+fn advertise_mdns(port: u16, pair_port: Option<u16>) -> Option<(mdns_sd::ServiceDaemon, String)> {
+    let host = this_device_name();
     let daemon = match mdns_sd::ServiceDaemon::new() {
         Ok(d) => d,
         Err(e) => {
@@ -218,6 +403,18 @@ fn advertise_mdns(port: u16) -> Option<(mdns_sd::ServiceDaemon, String)> {
             return None;
         }
     };
+    // TXT carries what the Mac needs BEFORE it has a key: which port to pair on
+    // and which pairing version this PC speaks. The SRV port stays the session
+    // port, so an already-paired Mac ignores all of this.
+    let mut props: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    props.insert(
+        protocol::MDNS_TXT_PAIR_VERSION.to_string(),
+        protocol::pairing::PAIRING_VERSION.to_string(),
+    );
+    if let Some(p) = pair_port {
+        props.insert(protocol::MDNS_TXT_PAIR_PORT.to_string(), p.to_string());
+    }
+
     // No explicit IP list: addr_auto lets the daemon track interface addresses itself,
     // so the advertisement stays correct when the PC switches networks while running.
     let info = match mdns_sd::ServiceInfo::new(
@@ -226,7 +423,7 @@ fn advertise_mdns(port: u16) -> Option<(mdns_sd::ServiceDaemon, String)> {
         &format!("{host}.local."),
         (),
         port,
-        None::<std::collections::HashMap<String, String>>,
+        props,
     ) {
         Ok(i) => i.enable_addr_auto(),
         Err(e) => {
@@ -251,9 +448,11 @@ pub struct Handle {
     stop: Arc<AtomicBool>,
     conn: ConnSlot,
     thread: Option<JoinHandle<()>>,
+    /// Pairing listener stop flag + thread. Stopped alongside the session
+    /// listener: "Stopped" must mean not pairable either.
+    pair: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     /// mDNS daemon + registered service fullname; dropped/unregistered in `stop()` so a
     /// stopped listener does not keep advertising a port nobody answers on.
-    #[cfg(windows)]
     mdns: Option<(mdns_sd::ServiceDaemon, String)>,
 }
 
@@ -262,7 +461,6 @@ impl Handle {
     /// connection, join the accept thread (the accept loop does not block, so the join
     /// returns quickly).
     pub fn stop(&mut self) {
-        #[cfg(windows)]
         if let Some((daemon, fullname)) = self.mdns.take() {
             // Wait briefly for the unregister so the "goodbye" packets actually leave
             // before the daemon is shut down; ignore errors — stopping must not fail.
@@ -278,6 +476,12 @@ impl Handle {
         if let Some(h) = self.thread.take() {
             let _ = h.join();
         }
+        // Safe to join: the accept loop never runs a dialog itself (those get
+        // their own detached threads), so it returns within one poll interval.
+        if let Some((stop, thread)) = self.pair.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+        }
     }
 }
 
@@ -290,9 +494,11 @@ impl Drop for Handle {
 /// Start listening. Key/port errors return IMMEDIATELY (shown in the GUI).
 /// `on_conn(ConnStatus)` is called from the background thread when a connection is
 /// established or lost, or when the handshake fails.
+/// `decide` answers pairing requests — see [`PairDecide`].
 pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
     cfg: &protocol::config::Config,
     on_conn: F,
+    decide: PairDecide,
 ) -> io::Result<Handle> {
     let psk = protocol::secure::psk_from_config_or_env(cfg)?; // key error -> GUI
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))?; // port error -> GUI
@@ -305,16 +511,22 @@ pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
     let (s, c) = (stop.clone(), conn.clone());
     let thread = thread::spawn(move || accept_loop(listener, psk, &s, &c, &on_conn));
 
+    // Non-fatal: without it, already-paired Macs still connect.
+    let pair = start_pair_listener(cfg, decide);
+    let pair_port = pair.as_ref().map(|(p, _, _)| *p);
+
     Ok(Handle {
         stop,
         conn,
         thread: Some(thread),
-        #[cfg(windows)]
-        mdns: advertise_mdns(cfg.port),
+        pair: pair.map(|(_, stop, thread)| (stop, thread)),
+        mdns: advertise_mdns(cfg.port, pair_port),
     })
 }
 
 /// Non-Windows dry-run: blocking variant (no stop; listens until the process dies).
+/// Pairing requests are auto-accepted after printing the code — there is no UI to
+/// confirm in, and this path exists to exercise the network end to end.
 #[cfg(not(windows))]
 pub fn serve(
     cfg: &protocol::config::Config,
@@ -325,6 +537,19 @@ pub fn serve(
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))?;
     listener.set_nonblocking(true)?;
     println!("win-receiver listening on 0.0.0.0:{} — waiting for connection", cfg.port);
+
+    let decide: PairDecide = Arc::new(|req: &PairRequest| {
+        println!(
+            "[dry-run] pairing request from {:?}, code {} — auto-accepting",
+            req.peer_name,
+            protocol::pairing::code_display(&req.code)
+        );
+        true
+    });
+    // Held for the lifetime of the process: dropping it would stop the loop.
+    let _pair = start_pair_listener(cfg, decide);
+    let _mdns = advertise_mdns(cfg.port, _pair.as_ref().map(|(p, _, _)| *p));
+
     let stop = Arc::new(AtomicBool::new(false));
     let conn: ConnSlot = Arc::new(Mutex::new(None));
     let on_conn: OnConn = Arc::new(on_conn);

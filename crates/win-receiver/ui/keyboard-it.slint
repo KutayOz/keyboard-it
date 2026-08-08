@@ -1,16 +1,16 @@
 import { LineEdit, Button, CheckBox, VerticalBox, HorizontalBox, GroupBox, AboutSlint } from "std-widgets.slint";
 
 // Small settings window — opened from the tray via "Settings...", the app outlives closing it.
+// There is nothing to type here any more: the Mac finds this PC over the network and the
+// pairing key is handed over automatically once the user approves the request.
 export component SettingsWindow inherits Window {
     title: "keyboard-it";
     preferred-width: 380px;
-    preferred-height: 400px;
+    preferred-height: 340px;
 
     in property <bool> active;                 // listener state (ACTIVE/INACTIVE)
     in property <string> this-pc;              // "This PC: HOSTNAME — 192.168.1.x" (from Rust)
-    in-out property <string> pairing-key;
-    in-out property <string> peer-ip;
-    in-out property <string> peer-port;
+    in-out property <string> listen-port;
     in-out property <bool> autostart;
     in property <string> status-line;          // info/error message from Rust
 
@@ -18,42 +18,50 @@ export component SettingsWindow inherits Window {
     callback stop-listener();
     callback save();
     callback autostart-changed(bool);
-    callback generate-key();
+    callback forget-devices();
 
     VerticalBox {
         padding: 12px;
         spacing: 8px;
 
         Text {
-            text: root.active ? "● ACTIVE — listening on 5599" : "○ INACTIVE — stopped";
+            text: root.active ? "● ACTIVE — listening on " + root.listen-port : "○ INACTIVE — stopped";
             color: root.active ? #2e7d32 : #b71c1c;
             font-size: 15px;
             font-weight: 700;
         }
 
-        // Identity line: what the user reads aloud if automatic discovery fails.
+        // Identity line: which PC the user should be looking for in the Mac's list.
         Text { text: root.this-pc; font-size: 12px; }
+
+        GroupBox {
+            title: "Pairing";
+            VerticalBox {
+                spacing: 6px;
+                Text {
+                    text: "On the Mac, open Settings, pick this PC and click Pair. A confirmation with a 6-digit code appears here.";
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: "Forget paired Macs";
+                    clicked => { root.forget-devices(); }
+                }
+                Text {
+                    text: "Creates a new key, so every paired Mac has to pair again.";
+                    font-size: 11px;
+                    color: #808080;
+                    wrap: word-wrap;
+                }
+            }
+        }
 
         GroupBox {
             title: "Settings";
             VerticalBox {
                 spacing: 6px;
-                Text { text: "Pairing key (must be IDENTICAL on both machines)"; }
-                HorizontalBox {
-                    padding: 0px;
-                    spacing: 6px;
-                    LineEdit {
-                        placeholder-text: "KEYBOARD_IT_KEY";
-                        text <=> root.pairing-key;
-                        horizontal-stretch: 1;
-                    }
-                    Button { text: "Generate"; clicked => { root.generate-key(); } }
-                }
-                Text { text: "Use the same key on the Mac."; font-size: 11px; color: #808080; }
-                Text { text: "Peer IP (the sending Mac)"; }
-                LineEdit { placeholder-text: "192.168.1.x"; text <=> root.peer-ip; }
-                Text { text: "Port"; }
-                LineEdit { placeholder-text: "5599"; text <=> root.peer-port; }
+                Text { text: "Listening port"; }
+                LineEdit { placeholder-text: "5599"; text <=> root.listen-port; }
                 CheckBox {
                     text: "Start automatically at logon (elevated)";
                     checked <=> root.autostart;
@@ -73,10 +81,65 @@ export component SettingsWindow inherits Window {
             Button { text: "Save"; clicked => { root.save(); } }
         }
 
-        Text { text: root.status-line; color: #808080; font-size: 12px; }
+        Text { text: root.status-line; color: #808080; font-size: 12px; wrap: word-wrap; }
 
         Rectangle { vertical-stretch: 1; }
         AboutSlint { }
+    }
+}
+
+// Pairing confirmation. This single click is what authenticates the whole channel:
+// the pairing transport is encrypted but unauthenticated, and the code is derived from
+// the handshake hash, so a man in the middle cannot make both screens agree. Shown
+// on demand from Rust and always on top — it must not get lost behind other windows.
+export component PairRequestWindow inherits Window {
+    title: "keyboard-it — pairing request";
+    preferred-width: 340px;
+    preferred-height: 250px;
+    always-on-top: true;
+
+    in property <string> peer-name;
+    in property <string> code;        // pre-formatted "482 913"
+
+    callback allow();
+    callback deny();
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        Text {
+            text: "Allow this Mac to control this PC?";
+            font-size: 15px;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        Text { text: root.peer-name; font-size: 13px; wrap: word-wrap; }
+
+        Rectangle {
+            height: 56px;
+            background: #f0f0f0;
+            border-radius: 6px;
+            Text {
+                text: root.code;
+                font-size: 26px;
+                font-weight: 700;
+                letter-spacing: 2px;
+            }
+        }
+
+        Text {
+            text: "Allow only if the Mac shows the same code. Whoever you allow can type and click on this PC.";
+            font-size: 11px;
+            color: #808080;
+            wrap: word-wrap;
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+            Button { text: "Deny"; clicked => { root.deny(); } }
+            Button { text: "Allow"; primary: true; clicked => { root.allow(); } }
+        }
     }
 }
 

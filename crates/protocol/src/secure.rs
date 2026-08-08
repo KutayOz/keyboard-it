@@ -91,13 +91,15 @@ pub fn psk_from_env() -> io::Result<[u8; 32]> {
 }
 
 // --- The existing 4-byte BE length framing, reused unchanged for ciphertext ---
-fn write_frame<W: Write>(w: &mut W, data: &[u8]) -> io::Result<()> {
+// pub(crate) so the pairing handshake (pairing.rs) frames its messages exactly
+// the same way instead of growing a second, subtly different framing.
+pub(crate) fn write_frame<W: Write>(w: &mut W, data: &[u8]) -> io::Result<()> {
     w.write_all(&(data.len() as u32).to_be_bytes())?;
     w.write_all(data)?;
     w.flush()
 }
 
-fn read_frame<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+pub(crate) fn read_frame<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len)?;
     let n = u32::from_be_bytes(len) as usize;

@@ -288,9 +288,10 @@ fn set_mouse_captured(captured: bool) {
     }
 }
 
-/// Is sender-side first-run setup complete? (Key in config or env AND peer_host set.)
+/// Is sender-side first-run setup complete? (Key in config or env AND at least
+/// one address to try.)
 fn config_ready(cfg: &protocol::config::Config) -> bool {
-    protocol::secure::psk_from_config_or_env(cfg).is_ok() && !cfg.peer_host.is_empty()
+    protocol::secure::psk_from_config_or_env(cfg).is_ok() && !cfg.peer_addrs().is_empty()
 }
 
 pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
@@ -336,8 +337,9 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         // takes effect on the next attempt without a restart. Broken/missing file =
         // 'Setup needed'.
         let cfg = protocol::config::Config::load().ok().flatten().unwrap_or_default();
+        let addrs = cfg.peer_addrs();
         let psk = match protocol::secure::psk_from_config_or_env(&cfg) {
-            Ok(p) if !cfg.peer_host.is_empty() => p,
+            Ok(p) if !addrs.is_empty() => p,
             _ => {
                 conn_bg.store(ConnStatus::ConfigNeeded as u8, Ordering::Relaxed);
                 for _ in rx.try_iter() {} // drop events while disconnected
@@ -345,17 +347,26 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                 continue;
             }
         };
-        let addr = cfg.peer_addr();
         conn_bg.store(ConnStatus::Connecting as u8, Ordering::Relaxed);
-        let mut stream = match connect_retry(&addr) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("connect failed ({addr}): {e} — will retry.");
-                conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
-                for _ in rx.try_iter() {}
-                thread::sleep(Duration::from_secs(1));
-                continue;
+        // Pairing stores the PC's ".local" name first and its IP as a fallback,
+        // so a PC that moved to a new DHCP lease still reconnects, and so does one
+        // on a network where .local resolution is unavailable.
+        let mut connected = None;
+        for candidate in &addrs {
+            match connect_retry(candidate) {
+                Ok(s) => {
+                    connected = Some((s, candidate.clone()));
+                    break;
+                }
+                Err(e) => eprintln!("connect failed ({candidate}): {e}"),
             }
+        }
+        let Some((mut stream, addr)) = connected else {
+            eprintln!("no reachable address for the PC — will retry.");
+            conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
+            for _ in rx.try_iter() {}
+            thread::sleep(Duration::from_secs(1));
+            continue;
         };
         let mut transport = match protocol::secure::handshake_initiator(&mut stream, &psk) {
             Ok(t) => t,
@@ -410,12 +421,12 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         let open = menubar::show_setup_alert(
             mtm,
             "keyboard-it — first-run setup",
-            "Two details are needed before the first connection:\n\n\
-             \u{2022} Pairing key — click Generate and enter the SAME key on the Windows \
-             side (or paste the key already set there).\n\
-             \u{2022} Your Windows PC — pick it from the discovered list, or type its \
-             address by hand.\n\n\
-             Once saved, the app connects on its own (no restart needed).",
+            "Nothing to type. Make sure keyboard-it is running on your Windows PC and \
+             both machines are on the same network, then:\n\n\
+             \u{2022} Pick your PC from the discovered list.\n\
+             \u{2022} Click Pair & Connect.\n\
+             \u{2022} On the PC, confirm the 6-digit code that appears.\n\n\
+             The app connects on its own from there (no restart needed).",
         );
         if open {
             crate::settings::open(mtm);
