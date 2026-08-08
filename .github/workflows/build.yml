@@ -25,8 +25,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install dmgbuild (styled dmg; pure-python deps)
-        run: python3 -m pip install --quiet dmgbuild
+      # dmgbuild is installed by package.sh, which already handles PEP 668
+      # ("externally-managed-environment") with a --break-system-packages
+      # fallback. A duplicate step here only re-broke when the runner image
+      # started enforcing it — one install path, in the script both CI and a
+      # local packaging run share.
       - name: Package .app + .dmg
         run: bash packaging/mac/package.sh
       - uses: actions/upload-artifact@v4
