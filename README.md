@@ -8,7 +8,7 @@ whatever window has focus. No extra hardware, no cloud — one TCP connection on
 Double-tap the Fn key to switch input between the two machines.
 
 Setup is two clicks and nothing to type: the Mac finds the PC on the network, you pick it,
-and the PC asks you to confirm a 6-digit code.
+and the PC asks whether to allow it.
 
 ## How it works
 
@@ -22,10 +22,10 @@ Pairing runs once, on its own port, before any of that exists:
 
 ```
 Mac                                                       Windows
-mDNS browse ──► picks a PC ──► Noise NN (unauthenticated) ──► "Allow? code 482 913"
-                               6-digit code from the             │
-                               handshake hash, shown             ▼
-                               on BOTH screens ◄──── pairing key ── you click Allow
+mDNS browse ──► picks a PC ──► Noise NN (unauthenticated) ──► "Allow this Mac?"
+                                                                 │
+                                                                 ▼
+                                            ◄──── pairing key ── you click Allow
 ```
 
 - Double-tap Fn toggles forwarding. While active, input is suppressed on the Mac and its
@@ -102,16 +102,15 @@ and both on the same network:
 
 1. On the Mac, open **Settings** from the menu bar. Your PC appears in the list within a
    few seconds.
-2. Pick it and click **Pair & Connect**. A 6-digit code appears.
-3. On the PC, a window asks *"Allow this Mac to control this PC?"* with the same code.
-   Click **Allow**.
+2. Pick it and click **Pair & Connect**.
+3. On the PC, a window asks *"Allow this Mac to control this PC?"* Click **Allow**.
 
 That's it — the Mac stores the key the PC hands over and connects within about a second.
 
-The code is the security check, so glance at it: **allow only if both screens show the same
-number.** The pairing channel is encrypted but not yet authenticated, and the code is
-derived from the handshake, so anyone sitting in the middle would produce two different
-numbers. Whoever you allow can type and click on your PC.
+Your click is the whole security check, so it is worth a second of attention: whoever you
+allow can type and click on your PC for as long as the pairing lasts. Allow a machine you
+recognise, on a network you trust — see [Security model](#security-model) for what that
+does and does not cover.
 
 Other things worth knowing:
 
@@ -168,11 +167,17 @@ key, no connection. The receiver listens on all interfaces and the key is the on
 
 **Pairing (port 5600).** This is where the key comes from, so it cannot use the key. It
 runs `Noise_NN` — ephemeral keys only, no PSK — which is encrypted but *unauthenticated*.
-Authentication is the human: both sides derive a 6-digit code from the Noise handshake
-hash, which commits to both ephemeral public keys, and show it. An active attacker has to
-run two separate handshakes and so cannot make both codes match. Your click on **Allow**
-both authorizes the pairing and confirms the channel — which is why the codes are worth
-comparing rather than clicking through.
+The gate is consent, not cryptography: no Mac gets a key unless someone at the PC clicks
+**Allow**.
+
+One gap is left open deliberately. Both sides can derive a short code from the handshake
+hash, which commits to both ephemeral public keys — an active attacker has to run two
+separate handshakes and so cannot make both codes match. That code used to be shown on both
+screens for the user to compare. It is not any more, because a code nobody compares
+protects nobody, and nobody compared it. What that costs: someone able to intercept traffic
+on your LAN during the few seconds a pairing is in flight can sit in the middle and come
+away holding the key. Pair on a network you trust. (`protocol::pairing` still derives the
+code and never puts it on the wire, so bringing it back is a UI change, not a protocol one.)
 
 The receiver limits abuse of that dialog: one request at a time, a 10-second I/O timeout, a
 60-second auto-decline, and a cooldown after a decline.
@@ -187,7 +192,7 @@ The receiver limits abuse of that dialog: one request at a time, a 10-second I/O
   dialog appear — they just cannot get past it without someone at the PC clicking Allow.
 - Device names shown in the dialog come from the network. They are stripped of control
   characters and length-capped before display, but they are still self-reported: a name is
-  a label, not an identity. The code is what you verify.
+  a label, not an identity. Recognise the machine before you allow it.
 - Binaries are unsigned and not notarized — hence the Gatekeeper and SmartScreen warnings.
 
 ## License

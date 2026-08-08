@@ -17,12 +17,15 @@
 //! SAFETY: while ACTIVE the Mac keyboard is suppressed; if you get stuck, the mouse still
 //! works —  menu > Force Quit. Double-tap Fn always returns to INACTIVE.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::io;
+use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use block2::RcBlock;
 
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -35,7 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use objc2_app_kit::NSApplication;
-use objc2_foundation::MainThreadMarker;
+use objc2_foundation::{MainThreadMarker, NSTimer};
 
 use protocol::{mousebtn, InputEvent, KeyEvent, MsgType};
 
@@ -198,6 +201,52 @@ fn wizard_step(
     }
 }
 
+/// Watch for a permission that is granted while the app is already running.
+///
+/// CGEventTap evaluates Input Monitoring and Accessibility once, at process start,
+/// so granting them in System Settings afterwards changes nothing until a relaunch —
+/// and the menu bar goes on saying "Permission needed" over a settings pane the user
+/// can see is switched on. That looks like the grant did not work. Poll instead, and
+/// the moment both are actually granted, offer the relaunch that is the only thing
+/// still missing.
+///
+/// Installed only when the tap failed, so a healthy run pays nothing for it.
+fn install_permission_watcher(
+    mtm: MainThreadMarker,
+    permission_needed: Arc<AtomicBool>,
+    restart_needed: Arc<AtomicBool>,
+) {
+    // The alert runs a nested run loop, so a fire queued while it is up would
+    // stack a second one. Invalidating is the real stop; this guards the gap.
+    let asked = Cell::new(false);
+    let block = RcBlock::new(move |t: NonNull<NSTimer>| {
+        if asked.get() {
+            return;
+        }
+        if !(unsafe { CGPreflightListenEventAccess() } && ax_is_trusted()) {
+            return;
+        }
+        asked.set(true);
+        unsafe { t.as_ref().invalidate() };
+        // Whatever the answer, the state is no longer "a permission is missing".
+        permission_needed.store(false, Ordering::Relaxed);
+        restart_needed.store(true, Ordering::Relaxed);
+        let restart = menubar::show_choice_alert(
+            mtm,
+            "Permissions granted",
+            "keyboard-it can see both permissions now. macOS only applies them when the app \
+             starts, so one restart is all that is left.",
+            &["Restart now", "Later"],
+        ) == 0;
+        if restart {
+            relaunch_and_exit(mtm);
+        }
+    });
+    unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block);
+    }
+}
+
 /// Guided first-run permission chain (replaces bare official prompts): Input
 /// Monitoring first; Accessibility follows on the next launch (each grant needs a
 /// relaunch anyway, and one system prompt at a time is less confusing). Returns
@@ -215,7 +264,9 @@ fn permission_wizard(mtm: MainThreadMarker) -> bool {
              \u{2022} Accessibility — lets the app keep those keystrokes from also typing \
              on the Mac.\n\n\
              Continue brings up the system prompt for Input Monitoring (Accessibility \
-             follows after a restart).",
+             follows after a restart).\n\n\
+             macOS may also ask for Local Network access. Allow it — that is how keyboard-it \
+             finds your PC, and without it the PC list stays empty.",
             &|| {
                 let _ = unsafe { CGRequestListenEventAccess() };
             },
@@ -308,12 +359,16 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     let active_flag = Arc::new(AtomicBool::new(false));
     let conn_status = Arc::new(AtomicU8::new(initial_conn as u8));
     let permission_needed = Arc::new(AtomicBool::new(false));
+    // Set only by install_permission_watcher: the permissions are there, the process
+    // just predates them.
+    let restart_needed = Arc::new(AtomicBool::new(false));
     menubar::install_status_updater(
         mtm,
         menu_bar.status_item.clone(),
         active_flag.clone(),
         conn_status.clone(),
         permission_needed.clone(),
+        restart_needed.clone(),
     );
     // The settings window's status line mirrors the same connection state.
     crate::settings::set_conn_status_source(conn_status.clone());
@@ -328,6 +383,13 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // events pile up during an outage and flood the peer on reconnect.
     let (tx, rx) = mpsc::sync_channel::<InputEvent>(EVENT_QUEUE_CAP);
     let conn_bg = conn_status.clone();
+    // Consecutive rounds in which every stored address was unreachable. One round
+    // costs roughly connect_retry's 4 s budget per candidate plus the 1 s sleep, so
+    // the threshold is ~30-45 s of nothing — long enough not to fire on a PC that is
+    // rebooting, short enough that a user staring at the menu bar gets an answer.
+    // Declared out here purely so the loop body below keeps its indentation.
+    const UNREACHABLE_AFTER: u32 = 5;
+    let mut failed_rounds: u32 = 0;
     thread::spawn(move || loop {
         // Clear the dirty flag BEFORE reading the config: if a Save lands after this
         // point the flag stays set and the send loop below drops the connection within
@@ -363,11 +425,20 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         }
         let Some((mut stream, addr)) = connected else {
             eprintln!("no reachable address for the PC — will retry.");
-            conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
+            failed_rounds = failed_rounds.saturating_add(1);
+            let state = if failed_rounds >= UNREACHABLE_AFTER {
+                ConnStatus::Unreachable
+            } else {
+                ConnStatus::Disconnected
+            };
+            conn_bg.store(state as u8, Ordering::Relaxed);
             for _ in rx.try_iter() {}
             thread::sleep(Duration::from_secs(1));
             continue;
         };
+        // Reached it — whatever was wrong is over, including a re-pairing that
+        // replaced an address left behind by a network the user is no longer on.
+        failed_rounds = 0;
         let mut transport = match protocol::secure::handshake_initiator(&mut stream, &psk) {
             Ok(t) => t,
             Err(e) => {
@@ -425,7 +496,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
              both machines are on the same network, then:\n\n\
              \u{2022} Pick your PC from the discovered list.\n\
              \u{2022} Click Pair & Connect.\n\
-             \u{2022} On the PC, confirm the 6-digit code that appears.\n\n\
+             \u{2022} On the PC, click Allow when it asks.\n\n\
              The app connects on its own from there (no restart needed).",
         );
         if open {
@@ -678,6 +749,14 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             None
         }
     };
+
+    // The tap failed, so the app is sitting there useless until a permission changes.
+    // Nothing else notices that change, because macOS only re-reads permissions at
+    // process start — so watch for it here rather than leaving the user to guess that
+    // a relaunch is what turns their grant into a working app.
+    if permission_needed.load(Ordering::Relaxed) {
+        install_permission_watcher(mtm, permission_needed.clone(), restart_needed.clone());
+    }
 
     // Run AppKit AFTER the tap source is added to the main run loop. app.run() drives
     // the same main-thread CFRunLoop; the source is in kCFRunLoopCommonModes, so the tap

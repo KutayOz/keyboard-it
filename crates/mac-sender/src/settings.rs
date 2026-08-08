@@ -95,8 +95,17 @@ fn conn_status_text(s: ConnStatus) -> &'static str {
         ConnStatus::Connected => "Connected.",
         ConnStatus::Disconnected => "No connection — retrying in the background.",
         ConnStatus::HandshakeFailed => "The PC rejected the key — pair again.",
+        ConnStatus::Unreachable => "Can't reach your PC — pick it again and Pair & Connect.",
     }
 }
+
+/// How long the mDNS browse may return nothing before the window stops saying
+/// "Searching your network…" and starts saying why. Long enough that a healthy
+/// network has answered several times over; short enough to beat the user's
+/// patience. On macOS 15+ the overwhelmingly likely cause of a permanently
+/// empty list is Local Network access, which has no API to query — the timeout
+/// IS the detection.
+const DISCOVERY_GRACE: Duration = Duration::from_secs(8);
 
 /// Open (create on first use) the settings window and bring it to the front.
 pub fn open(mtm: MainThreadMarker) {
@@ -127,11 +136,17 @@ struct Ivars {
     popup: Retained<NSPopUpButton>,
     autostart_check: Retained<NSButton>,
     status_label: Retained<NSTextField>,
+    /// The line under the popup. Normally tells the user what to do next; turns
+    /// into a diagnosis once discovery has come up empty for long enough.
+    hint_label: Retained<NSTextField>,
     paired_label: Retained<NSTextField>,
     pair_button: Retained<NSButton>,
     unpair_button: Retained<NSButton>,
     /// Written by the mDNS browser thread, read by the 1 s timer.
     peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
+    /// When the browse started, so "still looking" can be told apart from
+    /// "nothing is ever going to arrive". See DISCOVERY_GRACE.
+    discovery_started: Instant,
     /// The list currently rendered in the popup; popupSelected: indexes into
     /// THIS (not `peers`) so a refresh between click and action cannot drift.
     shown_peers: RefCell<Vec<DiscoveredPeer>>,
@@ -215,6 +230,7 @@ define_class!(
                 return;
             }
             self.refresh_popup();
+            self.refresh_hint();
             self.sync_autostart();
             self.refresh_status();
             self.refresh_buttons();
@@ -261,7 +277,7 @@ impl SettingsController {
         popup.setEnabled(false);
 
         let hint = label(
-            ns_string!("Pick your PC, then confirm the code that appears on it."),
+            ns_string!("Pick your PC, then click Allow on it."),
             138.0,
             136.0,
             306.0,
@@ -297,16 +313,19 @@ impl SettingsController {
 
         let peers = Arc::new(Mutex::new(Vec::new()));
         spawn_browser(peers.clone());
+        let discovery_started = Instant::now();
 
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window,
             popup: popup.clone(),
             autostart_check: autostart_check.clone(),
             status_label,
+            hint_label: hint.clone(),
             paired_label,
             pair_button: pair_button.clone(),
             unpair_button: unpair_button.clone(),
             peers,
+            discovery_started,
             shown_peers: RefCell::new(Vec::new()),
             pair_state: Arc::new(Mutex::new(PairState::Idle)),
             status_hold: Cell::new(None),
@@ -344,6 +363,7 @@ impl SettingsController {
     /// Re-read config-derived UI (called when the window opens).
     fn load_fields_from_config(&self) {
         self.refresh_paired_label();
+        self.refresh_hint();
         self.sync_autostart();
         self.refresh_status();
         self.refresh_buttons();
@@ -381,6 +401,27 @@ impl SettingsController {
         let pairing = !matches!(*iv.pair_state.lock().unwrap(), PairState::Idle);
         iv.pair_button.setEnabled(!pairing && self.selected_peer().is_some());
         iv.unpair_button.setEnabled(!pairing && load_config().is_complete());
+    }
+
+    /// True once the browse has run long enough with nothing to show that
+    /// "Searching your network…" has stopped being an honest answer.
+    fn discovery_stalled(&self) -> bool {
+        let iv = self.ivars();
+        iv.discovery_started.elapsed() >= DISCOVERY_GRACE
+            && iv.peers.lock().map(|p| p.is_empty()).unwrap_or(false)
+    }
+
+    /// The line under the popup: what to do next, or why there is nothing to do.
+    fn refresh_hint(&self) {
+        let iv = self.ivars();
+        let text = if self.discovery_stalled() {
+            "Nothing is answering on this network."
+        } else {
+            "Pick your PC, then click Allow on it."
+        };
+        if iv.hint_label.stringValue().to_string() != text {
+            iv.hint_label.setStringValue(&NSString::from_str(text));
+        }
     }
 
     /// Show a message and keep the timer from overwriting it for `hold`.
@@ -441,7 +482,16 @@ impl SettingsController {
             iv.status_hold.set(None);
         }
         let Some(src) = CONN_STATUS.get() else { return };
-        let text = conn_status_text(ConnStatus::from_u8(src.load(Ordering::Relaxed)));
+        let conn = ConnStatus::from_u8(src.load(Ordering::Relaxed));
+        // A stalled browse outranks the connection line. "No connection —
+        // retrying in the background" is true, but it describes a link that
+        // cannot be established while the real problem is that the user has no
+        // way to pick a PC in the first place. Say the thing they can act on.
+        let text = if conn != ConnStatus::Connected && self.discovery_stalled() {
+            "No PCs found — check Privacy & Security \u{203A} Local Network."
+        } else {
+            conn_status_text(conn)
+        };
         if iv.status_label.stringValue().to_string() != text {
             iv.status_label.setStringValue(&NSString::from_str(text));
         }
@@ -455,34 +505,54 @@ impl SettingsController {
         // Stable order: the browser thread appends in resolve order, which would
         // make entries jump around between refreshes.
         now.sort_by(|a, b| a.name.cmp(&b.name));
+        let popup = &iv.popup;
+
+        // The empty case cannot sit behind the list-changed guard below: the list
+        // stays empty either way, but the REASON it is empty flips from "still
+        // looking" to "nothing is coming" when the grace period runs out, and that
+        // is the only signal the user gets.
+        if now.is_empty() {
+            let want = if self.discovery_stalled() {
+                "No PCs found"
+            } else {
+                "Searching your network…"
+            };
+            // Compare against item 0 rather than the selected item: whether a
+            // freshly repopulated popup auto-selects anything is not something to
+            // depend on, and if it did not, this would rebuild on every tick.
+            let have = (popup.numberOfItems() == 1)
+                .then(|| popup.itemTitleAtIndex(0).to_string());
+            if have.as_deref() != Some(want) {
+                popup.removeAllItems();
+                popup.addItemWithTitle(&NSString::from_str(want));
+                popup.setEnabled(false);
+            }
+            iv.shown_peers.borrow_mut().clear();
+            return;
+        }
+
         if now == *iv.shown_peers.borrow() {
             return;
         }
-        let popup = &iv.popup;
         let selected = popup.titleOfSelectedItem();
         popup.removeAllItems();
-        if now.is_empty() {
-            popup.addItemWithTitle(ns_string!("Searching your network…"));
-            popup.setEnabled(false);
-        } else {
-            popup.setEnabled(true);
-            popup.addItemWithTitle(ns_string!("Choose a discovered PC…"));
-            for p in &now {
-                // Flag the ones that cannot be paired with, rather than letting
-                // the user pick them and fail.
-                let title = if p.pair_port.is_some() {
-                    format!("{} ({})", p.name, p.host)
-                } else {
-                    format!("{} ({}) — needs a newer keyboard-it", p.name, p.host)
-                };
-                popup.addItemWithTitle(&NSString::from_str(&title));
-            }
-            // Keep the user's selection across rebuilds when it still exists.
-            if let Some(title) = selected {
-                let idx = popup.indexOfItemWithTitle(&title);
-                if idx >= 0 {
-                    popup.selectItemAtIndex(idx);
-                }
+        popup.setEnabled(true);
+        popup.addItemWithTitle(ns_string!("Choose a discovered PC…"));
+        for p in &now {
+            // Flag the ones that cannot be paired with, rather than letting
+            // the user pick them and fail.
+            let title = if p.pair_port.is_some() {
+                format!("{} ({})", p.name, p.host)
+            } else {
+                format!("{} ({}) — needs a newer keyboard-it", p.name, p.host)
+            };
+            popup.addItemWithTitle(&NSString::from_str(&title));
+        }
+        // Keep the user's selection across rebuilds when it still exists.
+        if let Some(title) = selected {
+            let idx = popup.indexOfItemWithTitle(&title);
+            if idx >= 0 {
+                popup.selectItemAtIndex(idx);
             }
         }
         *iv.shown_peers.borrow_mut() = now;
@@ -559,15 +629,15 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
         let ctl = stream.try_clone().ok();
 
         let name = this_mac_name();
-        let result = protocol::pairing::pair_initiator(&mut stream, &name, |code| {
+        // The callback is not about the code (which is no longer shown anywhere —
+        // nobody compared it, so it was decoration). It fires at the one instant
+        // that matters: the handshake is done and the wait has turned into waiting
+        // for a human, which is when the read timeout has to grow.
+        let result = protocol::pairing::pair_initiator(&mut stream, &name, |_code| {
             if let Some(c) = &ctl {
                 let _ = c.set_read_timeout(Some(PAIR_DECISION_WAIT));
             }
-            set(PairState::Busy(format!(
-                "Confirm on {} — code {}",
-                peer.name,
-                protocol::pairing::code_display(code)
-            )));
+            set(PairState::Busy(format!("Waiting for Allow on {}…", peer.name)));
         });
 
         let outcome = match result {

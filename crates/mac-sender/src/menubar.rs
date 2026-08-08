@@ -44,6 +44,12 @@ pub enum ConnStatus {
     /// Handshake rejected — most likely the keys differ between the two sides
     /// (secure.rs reports this as the peer rejecting the handshake).
     HandshakeFailed = 4,
+    /// Every stored address has been unreachable for long enough that this is not
+    /// a blip. Distinct from Disconnected because the fix is different: the paired
+    /// PC is probably not on this network at all (a config left over from an old
+    /// one), and the user has to pick it again. Since manual entry was removed
+    /// there is no other way out, so this state has to say so.
+    Unreachable = 5,
 }
 
 impl ConnStatus {
@@ -54,6 +60,7 @@ impl ConnStatus {
             2 => ConnStatus::Connected,
             3 => ConnStatus::Disconnected,
             4 => ConnStatus::HandshakeFailed,
+            5 => ConnStatus::Unreachable,
             _ => ConnStatus::ConfigNeeded,
         }
     }
@@ -65,6 +72,11 @@ pub fn title_for(active: bool, conn: ConnStatus) -> &'static NSString {
     match (conn, active) {
         (ConnStatus::ConfigNeeded, _) => ns_string!("\u{2699}\u{FE0F} Setup needed"), // gear
         (ConnStatus::HandshakeFailed, _) => ns_string!("\u{1F511} Key mismatch"), // key
+        // Deliberately not "No connection": that reads as "the PC is asleep, it
+        // will come back", which is exactly the wrong thing to think when the
+        // saved PC is on a network you left. Naming it sends the user to Settings.
+        (ConnStatus::Unreachable, false) => ns_string!("\u{1F50D} PC not found"), // magnifier
+        (ConnStatus::Unreachable, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (PC not found)"), // warning
         (ConnStatus::Connecting, false) => ns_string!("\u{23F3} Connecting…"), // hourglass
         (ConnStatus::Connecting, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (connecting…)"), // warning
         (ConnStatus::Disconnected, false) => ns_string!("\u{1F50C} No connection"), // plug
@@ -271,20 +283,28 @@ pub fn install_status_updater(
     active: Arc<AtomicBool>,
     conn: Arc<AtomicU8>,
     permission_needed: Arc<AtomicBool>,
+    restart_needed: Arc<AtomicBool>,
 ) {
     // None = write once on the first tick, whatever the initial title from setup() was.
-    let last: Cell<Option<(bool, u8, bool)>> = Cell::new(None);
+    let last: Cell<Option<(bool, u8, bool, bool)>> = Cell::new(None);
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
         let now = (
             active.load(Ordering::Relaxed),
             conn.load(Ordering::Relaxed),
             permission_needed.load(Ordering::Relaxed),
+            restart_needed.load(Ordering::Relaxed),
         );
         if last.get() != Some(now) {
             last.set(Some(now));
             if let Some(button) = status_item.button(mtm) {
                 // Without the permission nothing can be captured — it overrides every other state.
-                let title = if now.2 {
+                // 'Restart to apply' outranks even that: it means the permission IS granted and
+                // the only thing left is the relaunch macOS requires, which "Permission needed"
+                // actively misdescribes — it sends the user back to a settings pane that is
+                // already switched on.
+                let title = if now.3 {
+                    ns_string!("\u{1F504} Restart to apply") // arrows
+                } else if now.2 {
                     ns_string!("\u{26D4} Permission needed") // no-entry sign
                 } else {
                     title_for(now.0, ConnStatus::from_u8(now.1))
