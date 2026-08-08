@@ -4,8 +4,11 @@ Use a MacBook's keyboard and trackpad to control a Windows PC over the local net
 
 keyboard-it is a small software KVM: a menu bar app on the Mac captures keyboard and mouse
 input and streams it, encrypted, to a tray app on the Windows machine, which injects it into
-whatever window has focus. No extra hardware, no Bluetooth pairing, no cloud — one TCP
-connection on your LAN. Double-tap the Fn key to switch input between the two machines.
+whatever window has focus. No extra hardware, no cloud — one TCP connection on your LAN.
+Double-tap the Fn key to switch input between the two machines.
+
+Setup is two clicks and nothing to type: the Mac finds the PC on the network, you pick it,
+and the PC asks you to confirm a 6-digit code.
 
 ## How it works
 
@@ -13,6 +16,16 @@ connection on your LAN. Double-tap the Fn key to switch input between the two ma
 Mac (mac-sender)                                          Windows (win-receiver)
 CGEventTap ──► HID usage codes ──► Noise NNpsk0 / TCP ──► scancodes ──► SendInput
 capture + Fn toggle                encrypted, LAN only                  focused app
+```
+
+Pairing runs once, on its own port, before any of that exists:
+
+```
+Mac                                                       Windows
+mDNS browse ──► picks a PC ──► Noise NN (unauthenticated) ──► "Allow? code 482 913"
+                               6-digit code from the             │
+                               handshake hash, shown             ▼
+                               on BOTH screens ◄──── pairing key ── you click Allow
 ```
 
 - Double-tap Fn toggles forwarding. While active, input is suppressed on the Mac and its
@@ -76,23 +89,43 @@ normal cursor behavior.
 ### Windows
 
 Run the `.msi`. SmartScreen flags the unsigned installer: click **More info → Run anyway**.
-The receiver runs in the system tray; its settings window generates the pairing key, sets
-the port, and can enable start-at-login. Allow it through the Windows firewall when
-prompted — it listens on the configured TCP port.
+The receiver runs in the system tray and starts listening on its own — there is nothing to
+configure before pairing. The installer adds its own inbound firewall rule, so no Defender
+prompt should appear; if you installed by copying the `.exe` instead, answer **Allow** to
+the prompt on first launch. Its settings window sets the port, toggles start-at-login, and
+can forget paired Macs.
 
 ### Pairing
 
-Both machines must share the same pairing key:
+Nothing is typed and no addresses are exchanged. With keyboard-it running on both machines
+and both on the same network:
 
-1. On Windows, open the settings window from the tray icon and click **Generate** next to
-   the pairing key.
-2. On the Mac, open **Settings** from the menu bar, pick your PC from the discovered list,
-   enter the same key, and click **Save**.
+1. On the Mac, open **Settings** from the menu bar. Your PC appears in the list within a
+   few seconds.
+2. Pick it and click **Pair & Connect**. A 6-digit code appears.
+3. On the PC, a window asks *"Allow this Mac to control this PC?"* with the same code.
+   Click **Allow**.
 
-The Mac finds the PC by name over the local network, so no IP addresses are needed; if
-discovery fails, the Windows window shows the PC's name and IP to enter manually. The TCP
-port defaults to `5599` and must match on both sides. A missing key is fatal — the programs
-refuse to start — and a mismatched key fails the handshake.
+That's it — the Mac stores the key the PC hands over and connects within about a second.
+
+The code is the security check, so glance at it: **allow only if both screens show the same
+number.** The pairing channel is encrypted but not yet authenticated, and the code is
+derived from the handshake, so anyone sitting in the middle would produce two different
+numbers. Whoever you allow can type and click on your PC.
+
+Other things worth knowing:
+
+- The PC generates its key by itself on first run; you never see or copy it.
+- The Mac stores the PC's `.local` name, so the link survives the PC getting a new IP.
+- **Forget paired Macs** in the Windows settings window issues a new key, which locks out
+  every Mac paired so far. **Unpair** on the Mac just forgets the PC locally.
+- The PC only accepts one pairing request at a time, declines on its own after 60 seconds,
+  and ignores repeat requests for a few seconds after you decline one.
+- Discovery uses mDNS (the same mechanism as AirPlay and printer discovery). On a network
+  that blocks multicast, or with client isolation on, the PC will not show up. The TCP
+  port defaults to `5599`; the pairing listener uses `5600`, or an ephemeral port if that
+  one is taken — which is why the installer's firewall rule covers the *program* rather
+  than a fixed port.
 
 ## Build from source
 
@@ -104,8 +137,14 @@ cargo run -p mac-sender      # macOS side
 cargo run -p win-receiver    # Windows side
 ```
 
-On a non-Windows host, `win-receiver` prints received events instead of injecting them, so
-the whole network path can be exercised on one machine against `127.0.0.1`.
+On a non-Windows host, `win-receiver` prints received events instead of injecting them and
+auto-accepts pairing requests (there is no dialog to confirm in), so the whole network path
+can be exercised on one machine. Both binaries resolve to the same config path, so give
+them separate files:
+
+```sh
+KEYBOARD_IT_CONFIG=/tmp/kbit-receiver.toml cargo run -p win-receiver
+```
 
 Packaging:
 
@@ -122,13 +161,33 @@ Packaging:
 
 Built for a trusted home or office LAN, not the open internet.
 
-- Transport is `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` (the `snow` crate). Both sides prove
-  knowledge of a pre-shared key derived from `shared_secret` with BLAKE2s; all traffic is
-  encrypted with per-session ephemeral keys. No key, no start; wrong key, no connection.
+**Session (port 5599).** Transport is `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` (the `snow`
+crate). Both sides prove knowledge of a pre-shared key derived from `shared_secret` with
+BLAKE2s; all traffic is encrypted with per-session ephemeral keys. No key, no start; wrong
+key, no connection. The receiver listens on all interfaces and the key is the only gate.
+
+**Pairing (port 5600).** This is where the key comes from, so it cannot use the key. It
+runs `Noise_NN` — ephemeral keys only, no PSK — which is encrypted but *unauthenticated*.
+Authentication is the human: both sides derive a 6-digit code from the Noise handshake
+hash, which commits to both ephemeral public keys, and show it. An active attacker has to
+run two separate handshakes and so cannot make both codes match. Your click on **Allow**
+both authorizes the pairing and confirms the channel — which is why the codes are worth
+comparing rather than clicking through.
+
+The receiver limits abuse of that dialog: one request at a time, a 10-second I/O timeout, a
+60-second auto-decline, and a cooldown after a decline.
+
+**Everywhere.**
+
 - The pairing key is stored in plaintext in the local config file (mode 0600 on macOS).
   Anyone who can read that file can impersonate a peer.
-- The receiver listens on all interfaces on the configured port; the pre-shared key is the
-  only gate.
+- One key per PC, shared by every Mac paired to it. "Forget paired Macs" issues a new one
+  and locks all of them out; there is no per-device revocation.
+- Pairing is offered whenever the receiver is listening. Anyone on your LAN can make the
+  dialog appear — they just cannot get past it without someone at the PC clicking Allow.
+- Device names shown in the dialog come from the network. They are stripped of control
+  characters and length-capped before display, but they are still self-reported: a name is
+  a label, not an identity. The code is what you verify.
 - Binaries are unsigned and not notarized — hence the Gatekeeper and SmartScreen warnings.
 
 ## License

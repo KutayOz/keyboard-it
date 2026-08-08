@@ -3,13 +3,21 @@
 use std::io;
 use std::net::TcpStream;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long to keep retrying one address before giving up on it.
+const BUDGET: Duration = Duration::from_secs(4);
 
 /// Tries to connect to the address for ~4 s (win-receiver may not be up yet).
+///
+/// Bounded by wall clock, not attempt count: `peer_host` is normally a ".local"
+/// name, and an unresolvable one costs ~5 s per attempt. Forty of those would
+/// stall the caller for three minutes before it could try the fallback address —
+/// long enough that a PC which changed IP would look permanently dead.
 pub fn connect_retry(addr: &str) -> io::Result<TcpStream> {
-    let mut last_err = None;
-    for _ in 0..40 {
-        match TcpStream::connect(addr) {
+    let deadline = Instant::now() + BUDGET;
+    loop {
+        let err = match TcpStream::connect(addr) {
             Ok(s) => {
                 let _ = s.set_nodelay(true);
                 // Avoid blocking forever on silent drops: cap the handshake response
@@ -31,11 +39,12 @@ pub fn connect_retry(addr: &str) -> io::Result<TcpStream> {
                 }
                 return Ok(s);
             }
-            Err(e) => {
-                last_err = Some(e);
-                sleep(Duration::from_millis(100));
-            }
+            Err(e) => e,
+        };
+        // Checked after the attempt, so a slow-failing address is still tried once.
+        if Instant::now() >= deadline {
+            return Err(err);
         }
+        sleep(Duration::from_millis(100));
     }
-    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "connect failed")))
 }

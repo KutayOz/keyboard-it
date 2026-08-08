@@ -10,6 +10,10 @@ pub mod secure;
 /// Persistent config: shared secret + peer host.
 pub mod config;
 
+/// One-click pairing: hands the shared secret to a new peer over an
+/// unauthenticated Noise_NN channel, confirmed by a 6-digit code.
+pub mod pairing;
+
 /// Message type. Encoded as a single u8 tag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -189,6 +193,22 @@ pub const DEFAULT_PORT: u16 = 5599;
 /// mDNS/DNS-SD service type. Defined once here so the win-receiver advertiser
 /// and the mac-sender browser can never drift apart on the service name.
 pub const MDNS_SERVICE: &str = "_keyboard-it._tcp.local.";
+
+/// TXT record key carrying the receiver's PAIRING port (not the session port —
+/// that one is the SRV port). The Mac needs it before it has any key at all, so
+/// it has to travel in the advertisement rather than over the session socket.
+pub const MDNS_TXT_PAIR_PORT: &str = "pair";
+
+/// TXT record key carrying `pairing::PAIRING_VERSION`, so a Mac can tell "too
+/// old/new to pair with" apart from "unreachable" before opening a socket.
+pub const MDNS_TXT_PAIR_VERSION: &str = "pairv";
+
+/// Default pairing port: one above the session port. Only a hint — the receiver
+/// falls back to an ephemeral port if this one is taken and always publishes the
+/// port it actually got in the TXT record, so nothing depends on this value.
+pub fn default_pairing_port(session_port: u16) -> u16 {
+    session_port.wrapping_add(1)
+}
 
 use std::io::{self, Read, Write};
 

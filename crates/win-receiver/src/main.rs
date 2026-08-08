@@ -24,12 +24,29 @@ fn main() -> io::Result<()> {
     // Do not die silently on a broken config.toml (release builds have no console, so a
     // double-click would look like nothing happened): fall back to defaults and surface
     // the error in the GUI.
-    let (cfg, cfg_err) = match protocol::config::Config::load() {
+    let (mut cfg, cfg_err) = match protocol::config::Config::load() {
         Ok(c) => (c.unwrap_or_default(), None),
         Err(e) => (
             protocol::config::Config::default(),
             Some(format!("could not read config.toml, defaults loaded: {e}")),
         ),
+    };
+
+    // First run: mint a key immediately. Nothing starts without one — not the
+    // listener, and therefore not the mDNS advertisement — so a fresh install
+    // would be invisible on the network and could never be paired with. The user
+    // never sees this value; it exists only to be handed to a Mac during pairing.
+    let cfg_err = if cfg.shared_secret.is_empty() && std::env::var_os("KEYBOARD_IT_KEY").is_none() {
+        cfg.shared_secret = protocol::secure::generate_key();
+        cfg.role = protocol::config::Role::Receiver;
+        match cfg.save() {
+            // A key that cannot be persisted still works for this run, but the
+            // pairing would silently not survive a restart — say so.
+            Err(e) => Some(format!("could not save the pairing key: {e}")),
+            Ok(()) => cfg_err,
+        }
+    } else {
+        cfg_err
     };
 
     #[cfg(windows)]

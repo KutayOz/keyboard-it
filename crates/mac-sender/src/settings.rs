@@ -1,18 +1,21 @@
-//! Native settings window — the zero-terminal replacement for editing config.toml.
+//! Native settings window — the zero-typing replacement for editing config.toml.
 //!
-//! Pairing key (with Generate), a "Your Windows PC" popup fed by mDNS discovery,
-//! manual host/port fields, Start at Login, Save, and a live status line. Save
-//! writes the config and flips capture::CONFIG_DIRTY so the background connection
-//! drops and reconnects with the new values within about a second — no restart.
+//! A "Your Windows PC" popup fed by mDNS discovery, "Pair & Connect", Start at
+//! Login, and a live status line. Nothing here is typed: pairing fetches the key
+//! from the PC once the user approves the request there, writes the config, and
+//! flips capture::CONFIG_DIRTY so the background connection picks it up within
+//! about a second — no restart.
 //!
-//! Threading: AppKit objects are main-thread-only. The mDNS browser runs on a
-//! background thread and only writes an Arc<Mutex<Vec<DiscoveredPeer>>>; a 1 s
-//! main-thread NSTimer mirrors that list into the popup (same pattern as
-//! menubar::install_status_updater).
+//! Threading: AppKit objects are main-thread-only. Two background threads write
+//! shared state and never touch AppKit — the mDNS browser (an
+//! Arc<Mutex<Vec<DiscoveredPeer>>>) and the pairing worker (an
+//! Arc<Mutex<PairState>>) — and a 1 s main-thread NSTimer mirrors both into the
+//! window (same pattern as menubar::install_status_updater).
 
 #![allow(non_snake_case)]
 
 use std::cell::{Cell, RefCell};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,8 +24,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSMenu, NSMenuItem, NSPopUpButton, NSTextField,
-    NSWindow, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSButton, NSPopUpButton, NSTextField, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -37,9 +40,39 @@ use crate::menubar::ConnStatus;
 struct DiscoveredPeer {
     fullname: String,
     name: String,
+    /// Resolved IP. Used to reach the PC now, and stored as the fallback address.
     host: String,
+    /// The advertised ".local" name (trailing dot stripped). Preferred for the
+    /// stored config: macOS resolves it via mDNS, so the link survives the PC
+    /// getting a new DHCP lease.
+    hostname: String,
+    /// Session port (the SRV port).
     port: u16,
+    /// Pairing port from the TXT record. `None` means the PC is running a build
+    /// from before pairing existed.
+    pair_port: Option<u16>,
 }
+
+/// What the pairing worker is doing, rendered by the 1 s timer. Kept as
+/// pre-rendered text because only the worker knows the peer name and the code,
+/// and the timer must not have to re-derive them.
+#[derive(Clone, PartialEq, Eq)]
+enum PairState {
+    /// Nothing in flight — the status line falls back to the connection state.
+    Idle,
+    /// In progress; the button stays disabled.
+    Busy(String),
+    /// Terminal message, shown until `until` and then released back to Idle.
+    Finished { text: String, until: Instant },
+}
+
+/// Read timeout while waiting for the user to click Allow on the PC. Longer than
+/// the receiver's own 60 s auto-decline, so a timeout is reported by the PC as a
+/// decline rather than showing up here as a dead socket.
+const PAIR_DECISION_WAIT: Duration = Duration::from_secs(90);
+
+/// Timeout for everything before the human: TCP connect, handshake, name exchange.
+const PAIR_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The controller is main-thread-only (holds AppKit objects), so a thread_local
 // is the natural owner — no Send/Sync juggling for a single-window app.
@@ -57,11 +90,11 @@ pub fn set_conn_status_source(src: Arc<AtomicU8>) {
 
 fn conn_status_text(s: ConnStatus) -> &'static str {
     match s {
-        ConnStatus::ConfigNeeded => "Waiting for setup — enter a pairing key and choose a PC.",
+        ConnStatus::ConfigNeeded => "Not paired — pick your PC below and click Pair & Connect.",
         ConnStatus::Connecting => "Connecting…",
         ConnStatus::Connected => "Connected.",
         ConnStatus::Disconnected => "No connection — retrying in the background.",
-        ConnStatus::HandshakeFailed => "Key mismatch — use the same pairing key on both sides.",
+        ConnStatus::HandshakeFailed => "The PC rejected the key — pair again.",
     }
 }
 
@@ -91,19 +124,21 @@ pub fn open(mtm: MainThreadMarker) {
 /// Ivars of the controller: the window, its controls, and the discovery state.
 struct Ivars {
     window: Retained<NSWindow>,
-    key_field: Retained<NSTextField>,
-    host_field: Retained<NSTextField>,
-    port_field: Retained<NSTextField>,
     popup: Retained<NSPopUpButton>,
     autostart_check: Retained<NSButton>,
     status_label: Retained<NSTextField>,
+    paired_label: Retained<NSTextField>,
+    pair_button: Retained<NSButton>,
+    unpair_button: Retained<NSButton>,
     /// Written by the mDNS browser thread, read by the 1 s timer.
     peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
     /// The list currently rendered in the popup; popupSelected: indexes into
     /// THIS (not `peers`) so a refresh between click and action cannot drift.
     shown_peers: RefCell<Vec<DiscoveredPeer>>,
+    /// Written by the pairing worker thread, read by the 1 s timer.
+    pair_state: Arc<Mutex<PairState>>,
     /// While set and in the future, the timer must not overwrite the status line
-    /// (save feedback/errors would otherwise vanish within a second).
+    /// (transient feedback would otherwise vanish within a second).
     status_hold: Cell<Option<Instant>>,
 }
 
@@ -117,27 +152,11 @@ define_class!(
     unsafe impl NSObjectProtocol for SettingsController {}
 
     impl SettingsController {
-        // "Generate" -> fresh pairing key into the field (not saved until Save).
-        #[unsafe(method(generateKey:))]
-        fn generateKey(&self, _sender: Option<&AnyObject>) {
-            let key = protocol::secure::generate_key();
-            self.ivars().key_field.setStringValue(&NSString::from_str(&key));
-        }
-
-        // Popup selection fills the manual host/port fields; Save always reads the
-        // FIELDS, so whichever the user touched last (popup or typing) wins.
+        // Selecting a PC only moves the highlight; pairing is an explicit click,
+        // because it puts a dialog on someone else's screen.
         #[unsafe(method(popupSelected:))]
         fn popupSelected(&self, _sender: Option<&AnyObject>) {
-            let iv = self.ivars();
-            let idx = iv.popup.indexOfSelectedItem();
-            if idx < 1 {
-                return; // index 0 is the placeholder row
-            }
-            let peers = iv.shown_peers.borrow();
-            if let Some(p) = peers.get((idx - 1) as usize) {
-                iv.host_field.setStringValue(&NSString::from_str(&p.host));
-                iv.port_field.setStringValue(&NSString::from_str(&p.port.to_string()));
-            }
+            self.refresh_buttons();
         }
 
         // Checkbox applies immediately (same behavior as the menu bar item); the
@@ -150,48 +169,46 @@ define_class!(
             self.sync_autostart();
         }
 
-        // Save -> config.toml + wake the connection thread so it reconnects now.
-        #[unsafe(method(save:))]
-        fn save(&self, _sender: Option<&AnyObject>) {
+        // "Pair & Connect" -> hand the selected PC to a worker thread. Everything
+        // after this point is network + a human on the other machine, so it must
+        // not run on the main thread.
+        #[unsafe(method(pairAndConnect:))]
+        fn pairAndConnect(&self, _sender: Option<&AnyObject>) {
             let iv = self.ivars();
-            let key = iv.key_field.stringValue().to_string().trim().to_string();
-            let host = iv.host_field.stringValue().to_string().trim().to_string();
-            let port_text = iv.port_field.stringValue().to_string().trim().to_string();
-            let port = if port_text.is_empty() {
-                protocol::DEFAULT_PORT
-            } else {
-                match port_text.parse::<u16>() {
-                    Ok(p) if p > 0 => p,
-                    _ => {
-                        self.set_status(
-                            "Port must be a number between 1 and 65535.",
-                            Duration::from_secs(6),
-                        );
-                        return;
-                    }
-                }
+            let Some(peer) = self.selected_peer() else {
+                self.set_status("Choose your PC from the list first.", Duration::from_secs(5));
+                return;
             };
-            let cfg = protocol::config::Config {
-                shared_secret: key,
-                peer_host: host,
-                role: protocol::config::Role::Sender,
-                port,
-            };
+            // Guard against a double click landing two workers on one answer slot.
+            if !matches!(*iv.pair_state.lock().unwrap(), PairState::Idle) {
+                return;
+            }
+            *iv.pair_state.lock().unwrap() = PairState::Busy(format!("Contacting {}…", peer.name));
+            self.refresh_buttons();
+            spawn_pairing(peer, iv.pair_state.clone());
+        }
+
+        // "Unpair" -> forget the PC locally. The PC keeps its key; pairing again
+        // needs another approval there.
+        #[unsafe(method(unpair:))]
+        fn unpair(&self, _sender: Option<&AnyObject>) {
+            let mut cfg = load_config();
+            cfg.shared_secret.clear();
+            cfg.peer_host.clear();
+            cfg.peer_ip.clear();
             match cfg.save() {
                 Ok(()) => {
-                    // The connection thread polls this flag (~1 s) and drops the
-                    // current connection, so the new address/key applies at once.
                     crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed);
-                    self.set_status("Saved — applying…", Duration::from_secs(2));
+                    self.set_status("Unpaired.", Duration::from_secs(4));
                 }
-                Err(e) => {
-                    self.set_status(&format!("Save failed: {e}"), Duration::from_secs(6));
-                }
+                Err(e) => self.set_status(&format!("Could not unpair: {e}"), Duration::from_secs(6)),
             }
+            self.refresh_paired_label();
+            self.refresh_buttons();
         }
 
         // 1 s heartbeat while the window is visible: discovery list -> popup,
-        // autostart state -> checkbox, connection state -> status line.
+        // autostart state -> checkbox, pairing/connection state -> status line.
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: Option<&AnyObject>) {
             if !self.ivars().window.isVisible() {
@@ -200,6 +217,7 @@ define_class!(
             self.refresh_popup();
             self.sync_autostart();
             self.refresh_status();
+            self.refresh_buttons();
         }
     }
 );
@@ -207,14 +225,10 @@ define_class!(
 impl SettingsController {
     /// Build the window + controls, wire targets, start discovery and the timer.
     fn create(mtm: MainThreadMarker) -> Retained<Self> {
-        // Cmd+V/C/X/A route through the main menu, which an Accessory app does
-        // not have — install a minimal Edit menu so pasting the pairing key works.
-        install_edit_menu(mtm);
-
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable;
-        let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(440.0, 226.0));
+        let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(460.0, 210.0));
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -235,73 +249,66 @@ impl SettingsController {
             l.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(w, 17.0)));
             l
         };
-        let field = |x: f64, y: f64, w: f64| -> Retained<NSTextField> {
-            let f = NSTextField::textFieldWithString(ns_string!(""), mtm);
-            f.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(w, 24.0)));
-            f
-        };
 
-        let key_label = label(ns_string!("Pairing key"), 16.0, 191.0, 118.0);
-        let key_field = field(140.0, 187.0, 172.0);
-        key_field.setPlaceholderString(Some(ns_string!("same key as on Windows")));
-        let generate = unsafe {
-            NSButton::buttonWithTitle_target_action(ns_string!("Generate"), None, None, mtm)
-        };
-        generate.setFrame(NSRect::new(NSPoint::new(316.0, 182.0), NSSize::new(108.0, 32.0)));
-
-        let pc_label = label(ns_string!("Your Windows PC"), 16.0, 155.0, 118.0);
+        let pc_label = label(ns_string!("Your Windows PC"), 16.0, 168.0, 118.0);
         let popup = NSPopUpButton::initWithFrame_pullsDown(
             NSPopUpButton::alloc(mtm),
-            NSRect::new(NSPoint::new(138.0, 149.0), NSSize::new(286.0, 26.0)),
+            NSRect::new(NSPoint::new(138.0, 162.0), NSSize::new(306.0, 26.0)),
             false,
         );
         // Placeholder until discovery reports something (refresh_popup rebuilds).
         popup.addItemWithTitle(ns_string!("Searching your network…"));
         popup.setEnabled(false);
 
-        let host_label = label(ns_string!("Host / IP"), 16.0, 119.0, 118.0);
-        let host_field = field(140.0, 115.0, 164.0);
-        host_field.setPlaceholderString(Some(ns_string!("e.g. 192.168.1.20")));
-        let port_label = label(ns_string!("Port"), 310.0, 119.0, 36.0);
-        let port_field = field(348.0, 115.0, 76.0);
+        let hint = label(
+            ns_string!("Pick your PC, then confirm the code that appears on it."),
+            138.0,
+            136.0,
+            306.0,
+        );
+
+        let pair_button = unsafe {
+            NSButton::buttonWithTitle_target_action(ns_string!("Pair & Connect"), None, None, mtm)
+        };
+        pair_button.setFrame(NSRect::new(NSPoint::new(294.0, 96.0), NSSize::new(150.0, 32.0)));
+        // Return triggers pairing — the whole flow works keyboard-only.
+        pair_button.setKeyEquivalent(ns_string!("\r"));
+
+        let paired_label = label(ns_string!(""), 16.0, 103.0, 270.0);
+        let unpair_button =
+            unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Unpair"), None, None, mtm) };
+        unpair_button.setFrame(NSRect::new(NSPoint::new(16.0, 56.0), NSSize::new(100.0, 32.0)));
 
         let autostart_check = unsafe {
             NSButton::checkboxWithTitle_target_action(ns_string!("Start at Login"), None, None, mtm)
         };
-        autostart_check.setFrame(NSRect::new(NSPoint::new(138.0, 85.0), NSSize::new(220.0, 18.0)));
+        autostart_check.setFrame(NSRect::new(NSPoint::new(130.0, 64.0), NSSize::new(220.0, 18.0)));
 
-        let status_label = label(ns_string!(""), 16.0, 20.0, 294.0);
-        let save =
-            unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Save"), None, None, mtm) };
-        save.setFrame(NSRect::new(NSPoint::new(316.0, 12.0), NSSize::new(108.0, 32.0)));
-        // Return key triggers Save — the whole flow works keyboard-only.
-        save.setKeyEquivalent(ns_string!("\r"));
+        let status_label = label(ns_string!(""), 16.0, 20.0, 428.0);
 
         let content_view = window.contentView().expect("titled window has a content view");
-        for view in [
-            &*key_label, &*key_field, &*host_label, &*host_field, &*port_label, &*port_field,
-            &*pc_label, &*status_label,
-        ] {
+        for view in [&*pc_label, &*hint, &*paired_label, &*status_label] {
             content_view.addSubview(view);
         }
-        content_view.addSubview(&generate);
         content_view.addSubview(&popup);
+        content_view.addSubview(&pair_button);
+        content_view.addSubview(&unpair_button);
         content_view.addSubview(&autostart_check);
-        content_view.addSubview(&save);
 
         let peers = Arc::new(Mutex::new(Vec::new()));
         spawn_browser(peers.clone());
 
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window,
-            key_field,
-            host_field,
-            port_field,
             popup: popup.clone(),
             autostart_check: autostart_check.clone(),
             status_label,
+            paired_label,
+            pair_button: pair_button.clone(),
+            unpair_button: unpair_button.clone(),
             peers,
             shown_peers: RefCell::new(Vec::new()),
+            pair_state: Arc::new(Mutex::new(PairState::Idle)),
             status_hold: Cell::new(None),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -312,9 +319,9 @@ impl SettingsController {
             control.setTarget(Some(&*this));
             control.setAction(Some(action));
         };
-        wire(&generate, sel!(generateKey:));
         wire(&autostart_check, sel!(toggleAutostart:));
-        wire(&save, sel!(save:));
+        wire(&pair_button, sel!(pairAndConnect:));
+        wire(&unpair_button, sel!(unpair:));
         unsafe {
             popup.setTarget(Some(&*this));
             popup.setAction(Some(sel!(popupSelected:)));
@@ -334,15 +341,46 @@ impl SettingsController {
         this
     }
 
-    /// Populate the fields from config.toml (called when the window opens).
+    /// Re-read config-derived UI (called when the window opens).
     fn load_fields_from_config(&self) {
-        let cfg = protocol::config::Config::load().ok().flatten().unwrap_or_default();
-        let iv = self.ivars();
-        iv.key_field.setStringValue(&NSString::from_str(&cfg.shared_secret));
-        iv.host_field.setStringValue(&NSString::from_str(&cfg.peer_host));
-        iv.port_field.setStringValue(&NSString::from_str(&cfg.port.to_string()));
+        self.refresh_paired_label();
         self.sync_autostart();
         self.refresh_status();
+        self.refresh_buttons();
+    }
+
+    /// "Paired with DESKTOP-ABC" / "Not paired yet".
+    fn refresh_paired_label(&self) {
+        let cfg = load_config();
+        let text = if cfg.is_complete() {
+            format!("Paired with {}", cfg.peer_host)
+        } else {
+            "Not paired yet".to_string()
+        };
+        let iv = self.ivars();
+        if iv.paired_label.stringValue().to_string() != text {
+            iv.paired_label.setStringValue(&NSString::from_str(&text));
+        }
+    }
+
+    /// The peer highlighted in the popup, if any. Reads `shown_peers` (not
+    /// `peers`) so a refresh between click and action cannot shift the index.
+    fn selected_peer(&self) -> Option<DiscoveredPeer> {
+        let iv = self.ivars();
+        let idx = iv.popup.indexOfSelectedItem();
+        if idx < 1 {
+            return None; // index 0 is the placeholder row
+        }
+        iv.shown_peers.borrow().get((idx - 1) as usize).cloned()
+    }
+
+    /// Enable/disable the two buttons from live state. Cheap enough to run on
+    /// every tick, which keeps them correct without any change notifications.
+    fn refresh_buttons(&self) {
+        let iv = self.ivars();
+        let pairing = !matches!(*iv.pair_state.lock().unwrap(), PairState::Idle);
+        iv.pair_button.setEnabled(!pairing && self.selected_peer().is_some());
+        iv.unpair_button.setEnabled(!pairing && load_config().is_complete());
     }
 
     /// Show a message and keep the timer from overwriting it for `hold`.
@@ -364,10 +402,38 @@ impl SettingsController {
         }
     }
 
-    /// Mirror the connection state into the status line (unless save feedback
-    /// is being held on screen).
+    /// Drive the status line. Pairing progress outranks the connection state:
+    /// while a request is in flight, "Confirm on DESKTOP-ABC — code 482 913" is
+    /// the only thing the user needs, and the background reconnect loop would
+    /// otherwise keep overwriting it with "No connection".
     fn refresh_status(&self) {
         let iv = self.ivars();
+
+        let pair_text = {
+            let mut state = iv.pair_state.lock().unwrap();
+            match &*state {
+                PairState::Idle => None,
+                PairState::Busy(text) => Some(text.clone()),
+                PairState::Finished { text, until } => {
+                    if Instant::now() < *until {
+                        Some(text.clone())
+                    } else {
+                        // Released back to the connection status, and the config
+                        // written by the worker is now reflected in the labels.
+                        *state = PairState::Idle;
+                        self.refresh_paired_label();
+                        None
+                    }
+                }
+            }
+        };
+        if let Some(text) = pair_text {
+            if iv.status_label.stringValue().to_string() != text {
+                iv.status_label.setStringValue(&NSString::from_str(&text));
+            }
+            return;
+        }
+
         if let Some(until) = iv.status_hold.get() {
             if Instant::now() < until {
                 return;
@@ -402,8 +468,14 @@ impl SettingsController {
             popup.setEnabled(true);
             popup.addItemWithTitle(ns_string!("Choose a discovered PC…"));
             for p in &now {
-                let title = NSString::from_str(&format!("{} ({}:{})", p.name, p.host, p.port));
-                popup.addItemWithTitle(&title);
+                // Flag the ones that cannot be paired with, rather than letting
+                // the user pick them and fail.
+                let title = if p.pair_port.is_some() {
+                    format!("{} ({})", p.name, p.host)
+                } else {
+                    format!("{} ({}) — needs a newer keyboard-it", p.name, p.host)
+                };
+                popup.addItemWithTitle(&NSString::from_str(&title));
             }
             // Keep the user's selection across rebuilds when it still exists.
             if let Some(title) = selected {
@@ -417,39 +489,118 @@ impl SettingsController {
     }
 }
 
-/// Accessory apps have no main menu, so Cmd+V/C/X/Z/A do nothing in text fields
-/// (key equivalents resolve through the main menu). A minimal Edit menu is never
-/// visible for a menu-bar-less app but makes paste work — essential for a key
-/// copied from the Windows side. nil targets mean "first responder", i.e. the
-/// focused field editor.
-fn install_edit_menu(mtm: MainThreadMarker) {
-    let app = NSApplication::sharedApplication(mtm);
-    if app.mainMenu().is_some() {
-        return;
-    }
-    let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), ns_string!("Edit"));
-    let add = |title: &NSString, action: Sel, key: &NSString| {
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                title,
-                Some(action),
-                key,
-            )
-        };
-        edit.addItem(&item);
-    };
-    add(ns_string!("Undo"), sel!(undo:), ns_string!("z"));
-    add(ns_string!("Cut"), sel!(cut:), ns_string!("x"));
-    add(ns_string!("Copy"), sel!(copy:), ns_string!("c"));
-    add(ns_string!("Paste"), sel!(paste:), ns_string!("v"));
-    add(ns_string!("Select All"), sel!(selectAll:), ns_string!("a"));
+// The Edit menu that used to live here existed solely so Cmd+V worked in the
+// pairing-key field. There are no text fields left, so it went with them.
 
-    let main = NSMenu::new(mtm);
-    let edit_item = NSMenuItem::new(mtm);
-    edit_item.setSubmenu(Some(&edit));
-    main.addItem(&edit_item);
-    app.setMainMenu(Some(&main));
+fn load_config() -> protocol::config::Config {
+    protocol::config::Config::load().ok().flatten().unwrap_or_default()
+}
+
+/// This Mac's name as the user knows it ("Kutay's MacBook Pro"), shown in the
+/// confirmation dialog on the PC. `scutil` is the only place the friendly name
+/// lives; the POSIX hostname is a mangled version of it.
+fn this_mac_name() -> String {
+    std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Mac".to_string())
+}
+
+/// Run one pairing attempt off the main thread and report progress through
+/// `state`. Every exit path writes a `Finished` message: the button stays
+/// disabled until the state returns to Idle, so a silent return would wedge it.
+fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
+    std::thread::spawn(move || {
+        let set = |s: PairState| {
+            if let Ok(mut g) = state.lock() {
+                *g = s;
+            }
+        };
+        let done = |text: String, secs: u64| {
+            set(PairState::Finished {
+                text,
+                until: Instant::now() + Duration::from_secs(secs),
+            })
+        };
+
+        let Some(pair_port) = peer.pair_port else {
+            done(
+                format!("{} is running an older keyboard-it — update it on the PC.", peer.name),
+                8,
+            );
+            return;
+        };
+
+        let addr = format!("{}:{}", peer.host, pair_port);
+        // The address came from mDNS as a literal IP, so this parses and gets a
+        // real connect timeout; the by-name fallback is belt and braces.
+        let connected = match addr.parse::<SocketAddr>() {
+            Ok(sa) => TcpStream::connect_timeout(&sa, PAIR_IO_TIMEOUT),
+            Err(_) => TcpStream::connect(&addr),
+        };
+        let mut stream = match connected {
+            Ok(s) => s,
+            Err(e) => {
+                done(format!("Could not reach {}: {e}", peer.name), 8);
+                return;
+            }
+        };
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_read_timeout(Some(PAIR_IO_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(PAIR_IO_TIMEOUT));
+        // A dup of the same socket: setting a timeout through it affects the one
+        // underlying socket, which is how the read timeout gets extended at the
+        // exact moment the wait turns into "waiting for a human".
+        let ctl = stream.try_clone().ok();
+
+        let name = this_mac_name();
+        let result = protocol::pairing::pair_initiator(&mut stream, &name, |code| {
+            if let Some(c) = &ctl {
+                let _ = c.set_read_timeout(Some(PAIR_DECISION_WAIT));
+            }
+            set(PairState::Busy(format!(
+                "Confirm on {} — code {}",
+                peer.name,
+                protocol::pairing::code_display(code)
+            )));
+        });
+
+        let outcome = match result {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                done(format!("{} declined the pairing.", peer.name), 8);
+                return;
+            }
+            Err(e) => {
+                done(format!("Pairing failed: {e}"), 10);
+                return;
+            }
+        };
+
+        // Load-then-mutate: never rebuild the struct, or fields this window does
+        // not know about are silently dropped.
+        let mut cfg = load_config();
+        cfg.role = protocol::config::Role::Sender;
+        cfg.shared_secret = outcome.secret;
+        cfg.port = outcome.session_port;
+        // Prefer the mDNS name — it follows the PC to a new IP.
+        cfg.peer_host =
+            if peer.hostname.is_empty() { peer.host.clone() } else { peer.hostname.clone() };
+        cfg.peer_ip = peer.host.clone();
+        if let Err(e) = cfg.save() {
+            done(format!("Paired, but the settings could not be saved: {e}"), 10);
+            return;
+        }
+        // The connection thread polls this (~1 s) and reconnects with the new
+        // key and address — no restart.
+        crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed);
+        done(format!("Paired with {} — connecting…", outcome.peer_name), 5);
+    });
 }
 
 /// Browse protocol::MDNS_SERVICE in the background for the window's lifetime.
@@ -490,11 +641,21 @@ fn spawn_browser(peers: Arc<Mutex<Vec<DiscoveredPeer>>>) {
                         .strip_suffix(protocol::MDNS_SERVICE)
                         .map(|s| s.trim_end_matches('.').to_string())
                         .unwrap_or_else(|| fullname.clone());
+                    // The advertised ".local." name outlives any particular DHCP
+                    // lease, so it is what gets stored once pairing succeeds.
+                    let hostname = info.get_hostname().trim_end_matches('.').to_string();
+                    // Absent on receivers built before pairing existed.
+                    let pair_port = info
+                        .get_property_val_str(protocol::MDNS_TXT_PAIR_PORT)
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .filter(|p| *p != 0);
                     let peer = DiscoveredPeer {
                         fullname: fullname.clone(),
                         name,
                         host: ip.to_string(),
+                        hostname,
                         port: info.get_port(),
+                        pair_port,
                     };
                     if let Ok(mut list) = peers.lock() {
                         match list.iter_mut().find(|p| p.fullname == fullname) {

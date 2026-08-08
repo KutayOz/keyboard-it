@@ -1,9 +1,12 @@
 name: build
 
 # Cloud build/packaging: produces the .msi + .dmg without physical Windows/Mac machines.
+# - pull_request: compile + test + package on every PR, so a branch is never merged blind
+#   (this workflow previously ran only on demand, and PR #1 reached review with no checks)
 # - workflow_dispatch: manual trigger (gh workflow run build.yml)
 # - tag v*: additionally creates a GitHub Release with the installers attached
 on:
+  pull_request:
   workflow_dispatch:
   push:
     tags: ["v*"]
@@ -50,8 +53,15 @@ jobs:
         run: cargo build --release -p win-receiver
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
+      # -C/-L pass '-ext WixFirewallExtension' to candle and light respectively; cargo-wix
+      # has no --ext of its own. BOTH are required: candle needs the extension to compile
+      # the fw:FirewallException element, light to link its custom action and tables.
+      # WixFirewallExtension.dll ships with the WiX v3.14 toolset preinstalled on the runner.
       - name: Package .msi
-        run: cargo wix --package win-receiver --no-build --nocapture
+        run: >
+          cargo wix --package win-receiver --no-build --nocapture
+          -C -ext -C WixFirewallExtension
+          -L -ext -L WixFirewallExtension
       # cargo-wix derives the output name from the package name (win-receiver-<version>-x86_64.msi);
       # rename to keyboard-it-<version>-x64.msi so it carries the same product name as the dmg
       # and the site links.
