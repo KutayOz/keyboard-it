@@ -731,16 +731,26 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             // already explained — a second alert would just nag. Only surface the
             // unexpected case: wizard says both granted, yet the tap still failed.
             if permissions_ok {
+                // The "already switched ON" case is the one worth leading with,
+                // because it is the one that looks like the app is lying. macOS
+                // ties a permission to the exact binary it was granted to (for an
+                // unsigned app, its code hash), and every keyboard-it update is a
+                // different binary — so the row survives the update while the grant
+                // behind it does not. The switch reads ON, the app is denied, and
+                // nothing on screen connects the two.
                 let open = menubar::show_setup_alert(
                     mtm,
                     "keyboard-it — permission needed",
-                    "Keyboard capture could not start — a permission is missing.\n\n\
-                     If you granted the permission in the system prompt that appeared:\n\
-                     macOS requires the app to be quit and REOPENED for it to take effect.\n\n\
-                     If no prompt appeared: enable keyboard-it under System Settings \u{2192}\n\
-                     Privacy & Security \u{2192} Input Monitoring (and Accessibility),\n\
-                     then restart the app.\n\n\
-                     The app will stay in the menu bar as 'Permission needed'.",
+                    "Keyboard capture could not start — macOS is not granting Input \
+                     Monitoring or Accessibility.\n\n\
+                     If keyboard-it already looks switched ON in those lists, the entry \
+                     belongs to an earlier version. macOS ties the permission to the exact \
+                     app it was granted to, and updating replaces it. Select keyboard-it in \
+                     the list, remove it with the \u{2212} button, then add it back with \u{002B} \
+                     \u{2014} or switch it off and on again.\n\n\
+                     If keyboard-it is not in the list at all, add it there.\n\n\
+                     Either way macOS applies the change only when the app restarts. \
+                     keyboard-it offers to restart itself as soon as it sees the permission.",
                 );
                 if open {
                     open_input_monitoring_settings();
