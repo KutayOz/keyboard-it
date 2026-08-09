@@ -10,6 +10,7 @@
 
 use std::io;
 
+mod diag;
 mod inject;
 mod scancode;
 mod serve;
