@@ -695,17 +695,13 @@ fn spawn_browser(peers: Arc<Mutex<Vec<DiscoveredPeer>>>) {
         while let Ok(event) = rx.recv() {
             match event {
                 ServiceEvent::ServiceResolved(info) => {
-                    // Prefer IPv4 (recognizable to users); min() keeps the pick
-                    // stable across re-resolves so the popup does not churn.
                     let addrs: Vec<std::net::IpAddr> =
                         info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
-                    let ip = addrs
-                        .iter()
-                        .filter(|a| a.is_ipv4())
-                        .min()
-                        .or_else(|| addrs.iter().min())
-                        .copied();
-                    let Some(ip) = ip else { continue };
+                    // Rank, do not `min()`. Four of the five records a receiver
+                    // advertises are typically unreachable, and the old "filter to
+                    // IPv4 first" only hid that: one receiver with no A record and
+                    // the fallback picks `::1`. See protocol::addr_rank.
+                    let Some(ip) = protocol::pick_service_addr(addrs.iter()) else { continue };
                     let fullname = info.get_fullname().to_string();
                     let name = fullname
                         .strip_suffix(protocol::MDNS_SERVICE)

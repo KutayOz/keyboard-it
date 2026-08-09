@@ -210,6 +210,52 @@ pub fn default_pairing_port(session_port: u16) -> u16 {
     session_port.wrapping_add(1)
 }
 
+/// How likely an advertised address is to actually reach the peer — lower is
+/// better. Not a wire format: purely how a browser chooses among the A/AAAA
+/// records a receiver published.
+///
+/// It exists because "any advertised address will do" is false. A receiver
+/// running `enable_addr_auto()` publishes loopback and link-local records
+/// alongside the one usable address; measured from the Mac, this PC advertised
+///
+/// ```text
+/// [fe80::f9b9:…, ::1, ::5661:…, ::453e:…, 192.168.68.55]
+/// ```
+///
+/// The browser survived that only by filtering to IPv4 before `min()` — and the
+/// no-IPv4 fallback behind that filter was a live trap, because `::1` sorts below
+/// every other address in the list. A receiver advertising no IPv4 at all would
+/// have had the Mac dial its own loopback and wait out the timeout, with nothing
+/// on either screen to say so. Ranking makes a junk address a last resort instead
+/// of a coin flip.
+pub fn addr_rank(a: &std::net::IpAddr) -> u8 {
+    use std::net::IpAddr;
+    match a {
+        // Our own machine. Never the peer, whatever the peer advertised.
+        _ if a.is_loopback() => 3,
+        // 169.254/16: an interface that never got a lease, typically a dormant
+        // virtual NIC. Advertised readily, reachable almost never.
+        IpAddr::V4(v4) if v4.is_link_local() => 2,
+        IpAddr::V4(_) => 0,
+        // fe80::/10 means nothing without a scope id, which mDNS does not carry
+        // and a `host:port` string cannot express — so it black-holes rather than
+        // failing fast, which is the worst of both.
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => 2,
+        IpAddr::V6(_) => 1,
+    }
+}
+
+/// Pick the address to dial out of everything a receiver advertised.
+///
+/// Ties break on the address itself so the choice is stable across re-resolves:
+/// a picker that churns can swap the target between the click and the connect.
+pub fn pick_service_addr<'a, I>(addrs: I) -> Option<std::net::IpAddr>
+where
+    I: IntoIterator<Item = &'a std::net::IpAddr>,
+{
+    addrs.into_iter().min_by_key(|a| (addr_rank(a), **a)).copied()
+}
+
 use std::io::{self, Read, Write};
 
 impl KeyEvent {
@@ -280,6 +326,66 @@ mod tests {
     fn input_event_bad_tag() {
         assert_eq!(InputEvent::decode(&[9u8, 0, 0]), Err(DecodeError::BadTag(9)));
         assert_eq!(InputEvent::decode(&[]), Err(DecodeError::ShortBuffer));
+    }
+
+    /// The address set an unpatched receiver published, as measured FROM THE MAC
+    /// (`dns-sd -G v4v6 kutinho.local` agrees). One usable address out of five.
+    #[test]
+    fn one_usable_address_among_four_dead_ones() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let from_the_mac = [
+            ip("fe80::f9b9:dd17:228f:cff2"),
+            ip("::1"),
+            ip("::5661:6f66:5101:e5a4"),
+            ip("::453e:653:18da:51e1"),
+            ip("192.168.68.55"),
+        ];
+        assert_eq!(pick_service_addr(from_the_mac.iter()), Some(ip("192.168.68.55")));
+
+        // The trap the old "filter to IPv4, else min()" code was one missing A
+        // record away from: with no IPv4 to filter down to, `::1` is the minimum
+        // of what remains, so the fallback dialled our own loopback.
+        let no_ipv4: Vec<_> = from_the_mac.iter().copied().filter(|a| !a.is_ipv4()).collect();
+        assert_eq!(no_ipv4.iter().min().copied(), Some(ip("::1")));
+        // Ranked, loopback loses to the two routable-looking ones, and the
+        // tie between those breaks on the address.
+        assert_eq!(pick_service_addr(no_ipv4.iter()), Some(ip("::453e:653:18da:51e1")));
+
+        // An IPv4 loopback is only ever visible to a browser on the same machine,
+        // never over the LAN — but rank it anyway rather than rely on that.
+        let local_view = [ip("192.168.68.55"), ip("127.0.0.1")];
+        assert_eq!(pick_service_addr(local_view.iter()), Some(ip("192.168.68.55")));
+        assert_eq!(local_view.iter().min().copied(), Some(ip("127.0.0.1")));
+    }
+
+    #[test]
+    fn junk_addresses_lose_but_are_still_usable_alone() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        // A dormant virtual NIC must not outrank a real lease.
+        let apipa = [ip("169.254.29.166"), ip("192.168.68.55")];
+        assert_eq!(pick_service_addr(apipa.iter()), Some(ip("192.168.68.55")));
+        // Routable IPv6 beats link-local IPv6...
+        let v6 = [ip("fe80::1"), ip("2001:db8::5")];
+        assert_eq!(pick_service_addr(v6.iter()), Some(ip("2001:db8::5")));
+        // ...but any IPv4 beats any IPv6, and a lone bad address is still returned
+        // rather than dropped: failing to connect beats "no peer found".
+        let mixed = [ip("2001:db8::5"), ip("10.0.0.9")];
+        assert_eq!(pick_service_addr(mixed.iter()), Some(ip("10.0.0.9")));
+        let only_loopback = [ip("127.0.0.1")];
+        assert_eq!(pick_service_addr(only_loopback.iter()), Some(ip("127.0.0.1")));
+        assert_eq!(pick_service_addr([].iter()), None);
+    }
+
+    /// Re-resolves arrive in whatever order the daemon happens to emit them; the
+    /// pick must not depend on that or the target can change between the click
+    /// and the connect.
+    #[test]
+    fn pick_is_order_independent() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let a = [ip("192.168.68.55"), ip("127.0.0.1"), ip("192.168.68.9")];
+        let b = [ip("127.0.0.1"), ip("192.168.68.9"), ip("192.168.68.55")];
+        assert_eq!(pick_service_addr(a.iter()), pick_service_addr(b.iter()));
+        assert_eq!(pick_service_addr(a.iter()), Some(ip("192.168.68.9")));
     }
 
     #[test]

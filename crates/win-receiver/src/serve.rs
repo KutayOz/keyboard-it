@@ -403,6 +403,32 @@ fn advertise_mdns(port: u16, pair_port: Option<u16>) -> Option<(mdns_sd::Service
             return None;
         }
     };
+
+    // Advertise ONLY addresses this process can actually serve. `addr_auto` below
+    // otherwise publishes every address of every monitored interface, and four of
+    // the five records the Mac saw were dead ends:
+    //
+    //     [fe80::f9b9:…, ::1, ::5661:…, ::453e:…, 192.168.68.55]
+    //
+    //   * IPv6 of any kind. Both listeners bind `0.0.0.0`, which is IPv4-only, so
+    //     NOTHING on this machine ever answers on an IPv6 address — these are not
+    //     "sometimes routable", they are guaranteed to fail. `fe80::f9b9:…` is the
+    //     one that cost ~75 s per connect attempt before #5 taught the sender to
+    //     race the whole list; deleting it at the source is better than routing
+    //     around it, and it spares the sender four wasted sockets every time.
+    //   * loopback — enabled by default in mdns-sd. `::1` goes with the rest of
+    //     IPv6; `127.0.0.1` never leaves this host (a browser on the LAN cannot
+    //     see it, only one running here can), but publishing an address that means
+    //     "me" to whoever reads it has no upside either.
+    //
+    // Ignore the errors: a daemon that will not narrow its interfaces still
+    // advertises the right addresses among the wrong ones, which is strictly
+    // better than not advertising at all.
+    let _ = daemon.disable_interface(vec![
+        mdns_sd::IfKind::LoopbackV4,
+        mdns_sd::IfKind::LoopbackV6,
+        mdns_sd::IfKind::IPv6,
+    ]);
     // TXT carries what the Mac needs BEFORE it has a key: which port to pair on
     // and which pairing version this PC speaks. The SRV port stays the session
     // port, so an already-paired Mac ignores all of this.
