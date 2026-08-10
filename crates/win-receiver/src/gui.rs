@@ -11,6 +11,7 @@ use std::time::Duration;
 use protocol::config::{Config, Role};
 use protocol::pairing::{code_display, PairRequest};
 
+use crate::diag::plog;
 use crate::{autostart, serve};
 
 slint::include_modules!();
@@ -27,11 +28,22 @@ type AnswerSlot = Arc<Mutex<Option<mpsc::Sender<bool>>>>;
 
 /// Answer the waiting pairing thread, at most once per request. Taking the
 /// sender is what makes a second click (or a close after a click) a no-op.
-fn reply(slot: &AnswerSlot, yes: bool) {
-    if let Ok(mut s) = slot.lock() {
-        if let Some(tx) = s.take() {
-            let _ = tx.send(yes);
-        }
+///
+/// `who` only exists for the trace, and it earns its place: "Allow found nothing
+/// waiting" is a completely different bug from "Allow was never pressed", and
+/// from the Mac the two are the same 60 s of silence.
+fn reply(slot: &AnswerSlot, yes: bool, who: &str) {
+    match slot.lock() {
+        Ok(mut s) => match s.take() {
+            Some(tx) => {
+                let delivered = tx.send(yes).is_ok();
+                plog!("{who} -> answer={yes}, delivered to the pairing thread: {delivered}");
+            }
+            // Expected for Stop when nothing is pending; a real problem if it
+            // follows a click the user actually made.
+            None => plog!("{who} -> no request waiting (already answered, or timed out)"),
+        },
+        Err(_) => plog!("{who} -> the answer slot is poisoned; request left unanswered"),
     }
 }
 
@@ -91,7 +103,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let sw = settings.as_weak();
         let slot = answer.clone();
         pair_win.on_allow(move || {
-            reply(&slot, true);
+            reply(&slot, true, "Allow clicked");
             if let Some(w) = pw.upgrade() {
                 let _ = w.hide();
             }
@@ -105,7 +117,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let sw = settings.as_weak();
         let slot = answer.clone();
         pair_win.on_deny(move || {
-            reply(&slot, false);
+            reply(&slot, false, "Deny clicked");
             if let Some(w) = pw.upgrade() {
                 let _ = w.hide();
             }
@@ -119,7 +131,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         // hanging until the 60 s timeout.
         let slot = answer.clone();
         pair_win.window().on_close_requested(move || {
-            reply(&slot, false);
+            reply(&slot, false, "dialog closed with the title-bar X");
             slint::CloseRequestResponse::HideWindow
         });
     }
@@ -131,29 +143,61 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let pw = pair_win.as_weak();
         let slot = answer.clone();
         Arc::new(move |req: &PairRequest| {
+            plog!("decide() entered for {:?} — asking the UI thread to show the dialog", req.peer_name);
             let (tx, rx) = mpsc::channel::<bool>();
             match slot.lock() {
                 Ok(mut s) => *s = Some(tx),
-                Err(_) => return false,
+                Err(_) => {
+                    plog!("decide(): answer slot poisoned, declining without asking");
+                    return false;
+                }
             }
 
             let (name, code) = (req.peer_name.clone(), code_display(&req.code));
             let w = pw.clone();
+            // These three lines are the whole point of the trace. Between them
+            // sits the gap that cannot be seen from either end: a request that
+            // arrives, a closure that is queued, and a window that may or may not
+            // ever reach the screen.
             if slint::invoke_from_event_loop(move || {
-                if let Some(w) = w.upgrade() {
-                    w.set_peer_name(name.into());
-                    w.set_code(code.into());
-                    let _ = w.show();
+                match w.upgrade() {
+                    Some(w) => {
+                        w.set_peer_name(name.into());
+                        w.set_code(code.into());
+                        let shown = w.show();
+                        plog!("UI thread ran the closure; show() -> {shown:?}");
+                    }
+                    // The event loop is alive but the window is not: nothing will
+                    // ever appear and nobody can click.
+                    None => plog!("UI thread ran the closure, but the dialog window is gone"),
                 }
             })
             .is_err()
             {
                 // UI is gone (quitting) — decline rather than hang.
+                plog!("decide(): the event loop is gone, declining without asking");
                 return false;
             }
 
             // A timeout is a decline: an unattended PC must not pair itself.
-            let answered = rx.recv_timeout(PAIR_DECISION_TIMEOUT).unwrap_or(false);
+            let waited = std::time::Instant::now();
+            let answered = match rx.recv_timeout(PAIR_DECISION_TIMEOUT) {
+                Ok(v) => {
+                    plog!("decide(): answered {v} after {:.1}s", waited.elapsed().as_secs_f32());
+                    v
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    plog!(
+                        "decide(): NOBODY ANSWERED in {}s — auto-declining. Either the dialog never reached the screen or it was not seen.",
+                        PAIR_DECISION_TIMEOUT.as_secs()
+                    );
+                    false
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    plog!("decide(): the answer channel was dropped without an answer");
+                    false
+                }
+            };
 
             // On the timeout path nobody hid the window or cleared the slot.
             if let Ok(mut s) = slot.lock() {
@@ -270,7 +314,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
             // status line claims "the Mac can connect now" while 5599 refuses the
             // connection. A no-op when nothing is pending — `reply` only fires if a sender
             // is still parked in the slot.
-            reply(&slot, false);
+            reply(&slot, false, "Stop");
             if let Some(w) = pw.upgrade() {
                 let _ = w.hide();
             }

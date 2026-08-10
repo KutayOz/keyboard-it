@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use protocol::pairing::{PairDecision, PairRequest};
 use protocol::{InputEvent, KeyEvent, MsgType};
 
+use crate::diag::plog;
 use crate::inject;
 
 /// Connection state — carried from the background thread to the GUI status line (see gui.rs).
@@ -270,6 +271,7 @@ fn handle_pair(mut stream: TcpStream, ctx: &PairCtx) -> bool {
     let _ = stream.set_write_timeout(Some(PAIR_IO_TIMEOUT));
 
     let decide = ctx.decide.clone();
+    let t0 = Instant::now();
     match protocol::pairing::pair_responder(
         &mut stream,
         &ctx.secret,
@@ -278,17 +280,23 @@ fn handle_pair(mut stream: TcpStream, ctx: &PairCtx) -> bool {
         |req| decide(req),
     ) {
         Ok(PairDecision::Accepted(req)) => {
-            println!("paired with {:?} ({peer:?})", req.peer_name);
+            plog!("paired with {:?} ({peer:?}) after {:.1}s", req.peer_name, t0.elapsed().as_secs_f32());
             true
         }
         Ok(PairDecision::Declined(req)) => {
-            println!("pairing declined for {:?} ({peer:?})", req.peer_name);
+            plog!(
+                "declined {:?} ({peer:?}) after {:.1}s — a decline at ~60s is the auto-decline, not a click",
+                req.peer_name,
+                t0.elapsed().as_secs_f32()
+            );
             false
         }
         Err(e) => {
             // Port scanners and half-open probes land here too, so this is not
-            // worth surfacing in the UI.
-            eprintln!("pairing attempt failed ({peer:?}): {e}");
+            // worth surfacing in the UI — but it IS worth recording, because a
+            // request that dies here never reaches `decide` and so never puts a
+            // dialog on screen.
+            plog!("pairing attempt from {peer:?} failed after {:.1}s: {e}", t0.elapsed().as_secs_f32());
             false
         }
     }
@@ -312,16 +320,21 @@ fn pair_accept_loop(listener: TcpListener, ctx: Arc<PairCtx>, stop: &Arc<AtomicB
                     .map(|t| t.is_some_and(|t| Instant::now() < t))
                     .unwrap_or(false);
                 if cooling {
-                    eprintln!("pairing request from {peer:?} ignored (cooling down)");
+                    // Both of these hang up before the handshake, so the Mac
+                    // reports "the PC turned down the request" and no dialog is
+                    // ever asked for. Distinguishing them from "nothing arrived"
+                    // is most of the value of this file.
+                    plog!("request from {peer:?} REJECTED: cooling down after a recent decline");
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
                 // swap, not store: whoever flips false->true owns the dialog.
                 if ctx.busy.swap(true, Ordering::SeqCst) {
-                    eprintln!("pairing request from {peer:?} ignored (already pairing)");
+                    plog!("request from {peer:?} REJECTED: another request already owns the dialog");
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
+                plog!("request from {peer:?} accepted for handling");
                 let ctx = ctx.clone();
                 thread::spawn(move || {
                     let accepted = handle_pair(stream, &ctx);
@@ -357,7 +370,7 @@ fn start_pair_listener(
 ) -> Option<(u16, Arc<AtomicBool>, JoinHandle<()>)> {
     let secret = secret_to_share(cfg);
     if secret.is_empty() {
-        eprintln!("pairing disabled: no pairing key to hand out");
+        plog!("pairing DISABLED: no key to hand out");
         return None;
     }
     let preferred = protocol::default_pairing_port(cfg.port);
@@ -371,7 +384,7 @@ fn start_pair_listener(
     if listener.set_nonblocking(true).is_err() {
         return None;
     }
-    println!("pairing listener on 0.0.0.0:{port}");
+    plog!("pairing listener on 0.0.0.0:{port} (session port {})", cfg.port);
 
     let ctx = Arc::new(PairCtx {
         secret,
