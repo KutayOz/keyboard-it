@@ -118,8 +118,9 @@ Other things worth knowing:
 - The Mac stores the PC's `.local` name, so the link survives the PC getting a new IP.
 - **Forget paired Macs** in the Windows settings window issues a new key, which locks out
   every Mac paired so far. **Unpair** on the Mac just forgets the PC locally.
-- The PC only accepts one pairing request at a time, declines on its own after 60 seconds,
-  and ignores repeat requests for a few seconds after you decline one.
+- The PC only accepts one pairing request at a time, declines on its own after two
+  minutes, and ignores repeat requests for a few seconds after you decline one. The Mac
+  counts that deadline down on screen, so you know how long you have to walk over.
 - Discovery uses mDNS (the same mechanism as AirPlay and printer discovery). On a network
   that blocks multicast, or with client isolation on, the PC will not show up. The TCP
   port defaults to `5599`; the pairing listener uses `5600`, or an ephemeral port if that
@@ -180,7 +181,11 @@ away holding the key. Pair on a network you trust. (`protocol::pairing` still de
 code and never puts it on the wire, so bringing it back is a UI change, not a protocol one.)
 
 The receiver limits abuse of that dialog: one request at a time, a 10-second I/O timeout, a
-60-second auto-decline, and a cooldown after a decline.
+two-minute auto-decline, and a cooldown after a decline. That deadline lives in
+`protocol::PAIR_DECISION_TIMEOUT` rather than on either side, because both machines make
+promises about it to two different people — when it was defined separately the PC gave up
+at 60 s while the Mac promised nothing, and a click that arrived at 60.6 s was reported as
+"approved" on the PC and as a rejection on the Mac.
 
 **Everywhere.**
 
