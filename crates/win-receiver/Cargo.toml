@@ -22,6 +22,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_SystemInformation", # GetLocalTime — wall clock for the pairing trace
     "Win32_Security",               # SECURITY_ATTRIBUTES (CreateMutexW signature)
     "Win32_UI_Shell",               # ShellExecuteW — run schtasks elevated
+    "Win32_System_Com",             # CoInitializeEx — ShellExecuteW now runs off the UI thread
     "Win32_UI_WindowsAndMessaging",
 ] }
 slint = "1.17"

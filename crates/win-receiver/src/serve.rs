@@ -285,9 +285,10 @@ fn handle_pair(mut stream: TcpStream, ctx: &PairCtx) -> bool {
         }
         Ok(PairDecision::Declined(req)) => {
             plog!(
-                "declined {:?} ({peer:?}) after {:.1}s — a decline at ~60s is the auto-decline, not a click",
+                "declined {:?} ({peer:?}) after {:.1}s — a decline at ~{}s is the auto-decline, not a click",
                 req.peer_name,
-                t0.elapsed().as_secs_f32()
+                t0.elapsed().as_secs_f32(),
+                protocol::PAIR_DECISION_TIMEOUT.as_secs()
             );
             false
         }

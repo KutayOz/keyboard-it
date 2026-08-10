@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,9 +18,13 @@ use crate::{autostart, serve};
 slint::include_modules!();
 
 /// How long the pairing dialog waits for a click before declining on its own.
-/// The Mac gives it more than this, so a timeout surfaces there as a decline
-/// rather than a dropped connection.
-const PAIR_DECISION_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// From `protocol`, not from here. When this side owned the number it was 60 s
+/// while the Mac silently allowed 90 — so a user who walked over, read the
+/// dialog and clicked Allow could land after the request had already been
+/// declined, and be congratulated for it. Two screens promising two different
+/// deadlines to the same person is the bug; one constant is the fix.
+const PAIR_DECISION_TIMEOUT: Duration = protocol::PAIR_DECISION_TIMEOUT;
 
 /// Where the pairing thread parks while the dialog is up. `Arc`/`Mutex` rather
 /// than `Rc`/`RefCell` because the two ends really are on different threads: the
@@ -29,23 +34,41 @@ type AnswerSlot = Arc<Mutex<Option<mpsc::Sender<bool>>>>;
 /// Answer the waiting pairing thread, at most once per request. Taking the
 /// sender is what makes a second click (or a close after a click) a no-op.
 ///
-/// `who` only exists for the trace, and it earns its place: "Allow found nothing
-/// waiting" is a completely different bug from "Allow was never pressed", and
-/// from the Mac the two are the same 60 s of silence.
-fn reply(slot: &AnswerSlot, yes: bool, who: &str) {
+/// **Returns whether the answer actually reached the pairing thread**, and every
+/// caller that tells the user something must branch on it. It used to return
+/// nothing, and the Allow handler announced "Pairing approved — the Mac can
+/// connect now" unconditionally: once the request had expired the slot was
+/// already drained, the click went nowhere, and the PC congratulated the user
+/// while the Mac recorded a decline. Measured from a real Mac — click at 60.6 s,
+/// `PermissionDenied` on the wire, "approved" on screen.
+///
+/// `who` is for the trace: "Allow found nothing waiting" and "Allow was never
+/// pressed" are indistinguishable from the Mac and completely different here.
+fn reply(slot: &AnswerSlot, yes: bool, who: &str) -> bool {
     match slot.lock() {
         Ok(mut s) => match s.take() {
             Some(tx) => {
                 let delivered = tx.send(yes).is_ok();
                 plog!("{who} -> answer={yes}, delivered to the pairing thread: {delivered}");
+                delivered
             }
             // Expected for Stop when nothing is pending; a real problem if it
             // follows a click the user actually made.
-            None => plog!("{who} -> no request waiting (already answered, or timed out)"),
+            None => {
+                plog!("{who} -> no request waiting (already answered, or timed out)");
+                false
+            }
         },
-        Err(_) => plog!("{who} -> the answer slot is poisoned; request left unanswered"),
+        Err(_) => {
+            plog!("{who} -> the answer slot is poisoned; request left unanswered");
+            false
+        }
     }
 }
+
+/// What to say when a click arrived too late. The request is gone and the Mac has
+/// already been told no, so the only useful thing left is what to do next.
+const EXPIRED_MSG: &str = "That request had already expired — pair again from the Mac.";
 
 fn io_err<E: std::fmt::Display>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
@@ -103,12 +126,20 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let sw = settings.as_weak();
         let slot = answer.clone();
         pair_win.on_allow(move || {
-            reply(&slot, true, "Allow clicked");
+            // The claim follows the delivery. Saying "approved" when the answer
+            // went nowhere is how the user came away believing a pairing had
+            // worked while the Mac had already been told no.
+            let delivered = reply(&slot, true, "Allow clicked");
             if let Some(w) = pw.upgrade() {
                 let _ = w.hide();
             }
             if let Some(s) = sw.upgrade() {
-                s.set_status_line("Pairing approved — the Mac can connect now.".into());
+                s.set_status_line(if delivered {
+                    "Pairing approved — the Mac can connect now."
+                } else {
+                    EXPIRED_MSG
+                }
+                .into());
             }
         });
     }
@@ -117,12 +148,14 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let sw = settings.as_weak();
         let slot = answer.clone();
         pair_win.on_deny(move || {
-            reply(&slot, false, "Deny clicked");
+            // "Declined" is just as much a claim about what the Mac was told, so
+            // it gets the same treatment as Allow.
+            let delivered = reply(&slot, false, "Deny clicked");
             if let Some(w) = pw.upgrade() {
                 let _ = w.hide();
             }
             if let Some(s) = sw.upgrade() {
-                s.set_status_line("Pairing declined.".into());
+                s.set_status_line(if delivered { "Pairing declined." } else { EXPIRED_MSG }.into());
             }
         });
     }
@@ -203,12 +236,20 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
             if let Ok(mut s) = slot.lock() {
                 s.take();
             }
+            // Take the dialog down. This is what stops a request that has already
+            // been declined from still looking answerable — and the result is
+            // traced rather than discarded, because "the dialog was still on
+            // screen after the receiver gave up" is exactly how a click came to
+            // land on a dead request.
             let w = pw.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(w) = w.upgrade() {
-                    let _ = w.hide();
-                }
-            });
+            if slint::invoke_from_event_loop(move || match w.upgrade() {
+                Some(w) => plog!("dialog hide() after the wait -> {:?}", w.hide()),
+                None => plog!("dialog gone before it could be hidden"),
+            })
+            .is_err()
+            {
+                plog!("could not queue the hide: the event loop is gone");
+            }
             answered
         })
     };
@@ -422,20 +463,49 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     }
     {
         let sw = settings.as_weak();
+        // One toggle at a time. Without this, a user who re-ticks the box while a
+        // UAC prompt is already up gets two elevations racing to write the same
+        // task and two status lines fighting over the answer.
+        let busy = Arc::new(AtomicBool::new(false));
         settings.on_autostart_changed(move |on| {
-            let msg = match autostart::set_enabled(on) {
-                Ok(_) => if on {
-                    "Autostart enabled."
-                } else {
-                    "Autostart disabled."
+            if busy.swap(true, Ordering::SeqCst) {
+                if let Some(s) = sw.upgrade() {
+                    s.set_status_line("Still working on the last autostart change…".into());
+                    s.set_autostart(autostart::is_enabled());
                 }
-                .to_string(),
-                Err(e) => format!("Autostart unchanged: {e}"),
-            };
-            if let Some(s) = sw.upgrade() {
-                s.set_status_line(msg.into());
-                s.set_autostart(autostart::is_enabled()); // reflect the actual state
+                return;
             }
+            if let Some(s) = sw.upgrade() {
+                s.set_status_line("Asking Windows for permission — approve the prompt.".into());
+            }
+            // OFF THE UI THREAD, and that is the whole point rather than tidiness.
+            // `set_enabled` blocks on `ShellExecuteW("runas")` — which does not
+            // return until the user has answered UAC — and then polls for the task
+            // to appear. Run here, that stalls the very thread that services
+            // `invoke_from_event_loop`, so a pairing request arriving while the
+            // prompt is up never gets its dialog and auto-declines with nobody
+            // having seen anything. Moving it to a worker keeps the queue draining,
+            // which also means the verification budget can be as long as a human
+            // needs without freezing the window.
+            let sw = sw.clone();
+            let busy = busy.clone();
+            std::thread::spawn(move || {
+                let result = autostart::set_enabled(on);
+                let actual = autostart::is_enabled();
+                busy.store(false, Ordering::SeqCst);
+                let msg = match result {
+                    Ok(()) if on => "Autostart enabled.".to_string(),
+                    Ok(()) => "Autostart disabled.".to_string(),
+                    Err(e) => format!("Autostart unchanged: {e}"),
+                };
+                plog!("autostart toggle to {on} finished: {msg} (task present: {actual})");
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(s) = sw.upgrade() {
+                        s.set_status_line(msg.into());
+                        s.set_autostart(actual); // reflect the actual state
+                    }
+                });
+            });
         });
     }
 
