@@ -62,14 +62,19 @@ enum PairState {
     Idle,
     /// In progress; the button stays disabled.
     Busy(String),
+    /// The request is on the PC's screen and a human has to answer it. Held as a
+    /// deadline rather than a rendered string because this is the one state where
+    /// the user has to physically go somewhere, and "how long have I got" is the
+    /// only question they have. The 1 s tick re-renders the remaining time.
+    AwaitingApproval { peer: String, deadline: Instant },
     /// Terminal message, shown until `until` and then released back to Idle.
     Finished { text: String, until: Instant },
 }
 
-/// Read timeout while waiting for the user to click Allow on the PC. Longer than
-/// the receiver's own 60 s auto-decline, so a timeout is reported by the PC as a
-/// decline rather than showing up here as a dead socket.
-const PAIR_DECISION_WAIT: Duration = Duration::from_secs(90);
+/// Read timeout while waiting for the user to click Allow on the PC. Deliberately
+/// longer than the receiver's own auto-decline, so running out of time arrives as
+/// an explicit decline rather than as a dead socket this side cannot explain.
+const PAIR_DECISION_WAIT: Duration = protocol::PAIR_DECISION_WAIT;
 
 /// Timeout for everything before the human: TCP connect, handshake, name exchange.
 const PAIR_IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -455,6 +460,13 @@ impl SettingsController {
             match &*state {
                 PairState::Idle => None,
                 PairState::Busy(text) => Some(text.clone()),
+                // The instruction comes first and the clock second: the user is
+                // about to walk away from this screen, so what they carry with
+                // them has to be what to do, not how long they have.
+                PairState::AwaitingApproval { peer, deadline } => {
+                    let left = deadline.saturating_duration_since(Instant::now()).as_secs();
+                    Some(format!("Go to {peer} and click Allow — {left}s left"))
+                }
                 PairState::Finished { text, until } => {
                     if Instant::now() < *until {
                         Some(text.clone())
@@ -629,21 +641,45 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
         let ctl = stream.try_clone().ok();
 
         let name = this_mac_name();
+        // When the request actually landed on the PC's screen. The wire cannot
+        // tell an explicit Deny apart from the receiver's auto-decline, but the
+        // clock can: past the deadline, "declined" is the wrong word for it.
+        let asked_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let asked_at_cb = asked_at.clone();
         // The callback is not about the code (which is no longer shown anywhere —
         // nobody compared it, so it was decoration). It fires at the one instant
         // that matters: the handshake is done and the wait has turned into waiting
-        // for a human, which is when the read timeout has to grow.
+        // for a human, which is when the read timeout has to grow — and when the
+        // receiver's own decision clock starts, so the countdown starts here too.
         let result = protocol::pairing::pair_initiator(&mut stream, &name, |_code| {
             if let Some(c) = &ctl {
                 let _ = c.set_read_timeout(Some(PAIR_DECISION_WAIT));
             }
-            set(PairState::Busy(format!("Waiting for Allow on {}…", peer.name)));
+            if let Ok(mut g) = asked_at_cb.lock() {
+                *g = Some(Instant::now());
+            }
+            set(PairState::AwaitingApproval {
+                peer: peer.name.clone(),
+                deadline: Instant::now() + protocol::PAIR_DECISION_TIMEOUT,
+            });
         });
 
         let outcome = match result {
             Ok(o) => o,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                done(format!("{} declined the pairing.", peer.name), 8);
+                // Same error either way, so distinguish them by the clock rather
+                // than telling someone who simply ran out of time that their PC
+                // turned them down.
+                let expired = asked_at
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .is_some_and(|t| t.elapsed() >= protocol::PAIR_DECISION_TIMEOUT);
+                if expired {
+                    done(format!("No answer on {} — the request expired.", peer.name), 10);
+                } else {
+                    done(format!("{} declined the pairing.", peer.name), 8);
+                }
                 return;
             }
             Err(e) => {

@@ -210,6 +210,29 @@ pub fn default_pairing_port(session_port: u16) -> u16 {
     session_port.wrapping_add(1)
 }
 
+/// How long the receiver waits for a human to answer a pairing request before
+/// declining on its own.
+///
+/// Shared rather than defined on each side, because the two sides make promises
+/// about it to two different people and those promises have to agree. The old
+/// values did not: the PC gave up at 60 s while the Mac said nothing about a
+/// deadline at all, so a user who walked to the other machine, saw the dialog and
+/// clicked **Allow** could have the click land after the request had already been
+/// declined — and the PC still said "Pairing approved". Measured end to end from a
+/// real Mac: the click arrived at 60.6 s and the initiator got `PermissionDenied`
+/// while the PC reported success.
+///
+/// Two minutes because the task is "notice this, walk to another machine, read it,
+/// decide" — a minute is not a generous allowance for that, it is a stopwatch.
+pub const PAIR_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long the initiator keeps its socket open waiting for the answer.
+///
+/// Must stay comfortably above [`PAIR_DECISION_TIMEOUT`] so that running out of
+/// time arrives as an explicit decline from the receiver rather than as a dead
+/// socket on the sender, which cannot tell the user what happened.
+pub const PAIR_DECISION_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
+
 /// How likely an advertised address is to actually reach the peer — lower is
 /// better. Not a wire format: purely how a browser chooses among the A/AAAA
 /// records a receiver published.
