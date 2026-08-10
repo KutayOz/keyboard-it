@@ -1,7 +1,7 @@
 //! macOS menu bar (status bar) indicator: INACTIVE/ACTIVE + Quit.
 //!
 //! - Accessory activation policy → no Dock icon, menu bar only.
-//! - The NSStatusItem title shows the state as an emoji + text.
+//! - The NSStatusItem title is a single emoji, no text.
 //! - The dropdown NSMenu has "Quit" → re-associates the cursor before exiting.
 //!
 //! Everything runs on the MAIN thread (run() is called from the main thread and the tap
@@ -66,23 +66,21 @@ impl ConnStatus {
     }
 }
 
-/// Menu bar title (emoji + text) for INACTIVE/ACTIVE plus the connection state, so a
-/// dropped connection is visible from the menu bar.
+/// Menu bar title — one emoji, no text. Every state gets its own glyph, including the
+/// ACTIVE-but-cannot-deliver ones: without words, a shared warning sign would make
+/// three different problems look identical.
 pub fn title_for(active: bool, conn: ConnStatus) -> &'static NSString {
     match (conn, active) {
-        (ConnStatus::ConfigNeeded, _) => ns_string!("\u{2699}\u{FE0F} Setup needed"), // gear
-        (ConnStatus::HandshakeFailed, _) => ns_string!("\u{1F511} Key mismatch"), // key
-        // Deliberately not "No connection": that reads as "the PC is asleep, it
-        // will come back", which is exactly the wrong thing to think when the
-        // saved PC is on a network you left. Naming it sends the user to Settings.
-        (ConnStatus::Unreachable, false) => ns_string!("\u{1F50D} PC not found"), // magnifier
-        (ConnStatus::Unreachable, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (PC not found)"), // warning
-        (ConnStatus::Connecting, false) => ns_string!("\u{23F3} Connecting…"), // hourglass
-        (ConnStatus::Connecting, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (connecting…)"), // warning
-        (ConnStatus::Disconnected, false) => ns_string!("\u{1F50C} No connection"), // plug
-        (ConnStatus::Disconnected, true) => ns_string!("\u{26A0}\u{FE0F} ACTIVE (no connection)"), // warning
-        (ConnStatus::Connected, true) => ns_string!("\u{1F7E2} ACTIVE"), // green circle
-        (ConnStatus::Connected, false) => ns_string!("\u{1F512} INACTIVE"), // lock
+        (ConnStatus::ConfigNeeded, _) => ns_string!("\u{2699}\u{FE0F}"), // gear
+        (ConnStatus::HandshakeFailed, _) => ns_string!("\u{1F511}"),     // key
+        (ConnStatus::Unreachable, false) => ns_string!("\u{1F50D}"),     // magnifier
+        (ConnStatus::Unreachable, true) => ns_string!("\u{1F6A8}"),      // siren
+        (ConnStatus::Connecting, false) => ns_string!("\u{23F3}"),       // hourglass
+        (ConnStatus::Connecting, true) => ns_string!("\u{1F7E1}"),       // yellow circle
+        (ConnStatus::Disconnected, false) => ns_string!("\u{1F50C}"),    // plug
+        (ConnStatus::Disconnected, true) => ns_string!("\u{1F534}"),     // red circle
+        (ConnStatus::Connected, true) => ns_string!("\u{1F7E2}"),        // green circle
+        (ConnStatus::Connected, false) => ns_string!("\u{1F512}"),       // lock
     }
 }
 
@@ -303,9 +301,9 @@ pub fn install_status_updater(
                 // actively misdescribes — it sends the user back to a settings pane that is
                 // already switched on.
                 let title = if now.3 {
-                    ns_string!("\u{1F504} Restart to apply") // arrows
+                    ns_string!("\u{1F504}") // arrows
                 } else if now.2 {
-                    ns_string!("\u{26D4} Permission needed") // no-entry sign
+                    ns_string!("\u{26D4}") // no-entry sign
                 } else {
                     title_for(now.0, ConnStatus::from_u8(now.1))
                 };
