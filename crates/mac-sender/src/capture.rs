@@ -8,24 +8,22 @@
 //! PERMISSIONS (both required):
 //!   - Input Monitoring: to observe events.
 //!   - Accessibility: to suppress keys (Drop) while ACTIVE.
-//! On first run a guided wizard (permission_wizard) walks through both: it fires the
-//! official system prompts and relaunches the app after a grant (CGEventTap evaluates
-//! permissions at process start). When both are already granted no dialog appears.
+//! On first run the permissions window (crate::permissions) walks through these and
+//! Local Network in one pass, firing the official system prompts as each one lands and
+//! asking for a single restart at the end (CGEventTap evaluates permissions at process
+//! start). When both are already granted nothing is shown.
 //! PREREQUISITE: System Settings > Keyboard > set "Press fn (globe) key to" to "Do Nothing"
 //!   (otherwise macOS may reserve double-Fn for Dictation and swallow the toggle).
 //!
 //! SAFETY: while ACTIVE the Mac keyboard is suppressed; if you get stuck, the mouse still
 //! works —  menu > Force Quit. Double-tap Fn always returns to INACTIVE.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io;
-use std::ptr::NonNull;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-
-use block2::RcBlock;
 
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -38,13 +36,14 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use objc2_app_kit::NSApplication;
-use objc2_foundation::{MainThreadMarker, NSTimer};
+use objc2_foundation::MainThreadMarker;
 
 use protocol::{mousebtn, InputEvent, KeyEvent, MsgType};
 
 use crate::keymap::mac_keycode_to_hid;
 use crate::menubar::{self, ConnStatus};
 use crate::net::connect_retry;
+use crate::permissions;
 
 const FN_KEYCODE: i64 = 0x3F; // kVK_Function (Fn / Globe)
 const CAPSLOCK_KEYCODE: i64 = 0x39; // kVK_CapsLock — acts as a TOGGLE in flagsChanged
@@ -58,238 +57,6 @@ const DOUBLE_TAP: Duration = Duration::from_millis(400);
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
-}
-
-// First-run permission flow (macOS 10.15+): the preflight probes Input Monitoring
-// WITHOUT prompting (true when granted). The request shows Apple's OFFICIAL permission
-// dialog AND adds the app to System Settings > Privacy & Security > Input Monitoring
-// automatically — the user does not have to find the app by hand.
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightListenEventAccess() -> bool;
-    fn CGRequestListenEventAccess() -> bool;
-}
-
-/// Accessibility permission: when called with kAXTrustedCheckOptionPrompt=true and the
-/// permission is MISSING, Apple's official system dialog appears and the app is added
-/// to the Accessibility list automatically; when ALREADY granted it returns true with
-/// no dialog at all.
-fn ax_trusted_with_prompt() -> bool {
-    use core_foundation::boolean::CFBoolean;
-    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
-    use core_foundation::string::{CFString, CFStringRef};
-
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        #[allow(non_upper_case_globals)]
-        static kAXTrustedCheckOptionPrompt: CFStringRef;
-        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
-    }
-    unsafe {
-        // Get rule: we do not own the system constant, so it is retained.
-        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
-        let opts = CFDictionary::from_CFType_pairs(&[(
-            key.as_CFType(),
-            CFBoolean::true_value().as_CFType(),
-        )]);
-        AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef())
-    }
-}
-
-/// Accessibility state WITHOUT any prompt — the wizard's "check" button must be
-/// able to poll silently (ax_trusted_with_prompt would re-show the system dialog).
-fn ax_is_trusted() -> bool {
-    #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
-        fn AXIsProcessTrusted() -> bool;
-    }
-    unsafe { AXIsProcessTrusted() }
-}
-
-/// Open the System Settings > Privacy & Security > Input Monitoring pane directly
-/// (for the 'Open System Settings' buttons in the permission dialogs).
-fn open_input_monitoring_settings() {
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
-        .spawn();
-}
-
-/// Same, for the Accessibility pane (second wizard step).
-fn open_accessibility_settings() {
-    let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
-}
-
-/// The enclosing .app bundle when the executable runs from one
-/// (…/Name.app/Contents/MacOS/binary). None for bare `cargo run` binaries.
-fn app_bundle_path() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    exe.ancestors()
-        .find(|p| p.extension().map_or(false, |e| e == "app"))
-        .map(Into::into)
-}
-
-/// Restart the app so CGEventTap re-evaluates a just-granted permission (macOS
-/// checks it at process start). 'sleep 1' lets THIS process exit first so the
-/// single-instance lock port (main.rs) is free for the new instance; "$0" carries
-/// the bundle path into `open` without shell-quoting pitfalls. Outside an .app
-/// bundle (cargo run) `open -n` cannot target us, so the user restarts by hand.
-fn relaunch_and_exit(mtm: MainThreadMarker) -> ! {
-    if let Some(bundle) = app_bundle_path() {
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("sleep 1; open -n \"$0\"")
-            .arg(&bundle)
-            .spawn();
-    } else {
-        menubar::show_alert(
-            mtm,
-            "Permission granted",
-            "The app quits now — start keyboard-it again by hand to finish.\n\
-             (It is running outside an .app bundle, so it cannot restart itself.)",
-        );
-    }
-    NSApplication::sharedApplication(mtm).terminate(None);
-    // terminate: exits the process itself; this line is unreachable belt-and-braces.
-    std::process::exit(0);
-}
-
-/// One guided permission step: intro alert -> official system prompt -> a
-/// check-and-restart loop. Returns false when the user postponed ("Later").
-/// On a successful check it relaunches the app and never returns.
-fn wizard_step(
-    mtm: MainThreadMarker,
-    name: &str,
-    intro_title: &str,
-    intro_text: &str,
-    fire_prompt: &dyn Fn(),
-    granted: &dyn Fn() -> bool,
-    open_pane: &dyn Fn(),
-) -> bool {
-    if menubar::show_choice_alert(mtm, intro_title, intro_text, &["Continue", "Later"]) != 0 {
-        return false;
-    }
-    fire_prompt();
-    loop {
-        let text = format!(
-            "Switch keyboard-it ON in the {name} prompt (or under System Settings \u{2192} \
-             Privacy & Security \u{2192} {name}), then come back here.\n\n\
-             macOS applies the permission only after a restart, so keyboard-it restarts \
-             itself once you confirm."
-        );
-        match menubar::show_choice_alert(
-            mtm,
-            &format!("{name} — waiting for the permission"),
-            &text,
-            &["I granted it — check & restart", "Open System Settings", "Later"],
-        ) {
-            0 => {
-                if granted() {
-                    relaunch_and_exit(mtm);
-                }
-                menubar::show_alert(
-                    mtm,
-                    &format!("{name} is not granted yet"),
-                    "macOS does not report the permission yet. Use 'Open System Settings', \
-                     switch keyboard-it ON there, then try again.",
-                );
-            }
-            1 => open_pane(),
-            _ => return false,
-        }
-    }
-}
-
-/// Watch for a permission that is granted while the app is already running.
-///
-/// CGEventTap evaluates Input Monitoring and Accessibility once, at process start,
-/// so granting them in System Settings afterwards changes nothing until a relaunch —
-/// and the menu bar goes on saying "Permission needed" over a settings pane the user
-/// can see is switched on. That looks like the grant did not work. Poll instead, and
-/// the moment both are actually granted, offer the relaunch that is the only thing
-/// still missing.
-///
-/// Installed only when the tap failed, so a healthy run pays nothing for it.
-fn install_permission_watcher(
-    mtm: MainThreadMarker,
-    permission_needed: Arc<AtomicBool>,
-    restart_needed: Arc<AtomicBool>,
-) {
-    // The alert runs a nested run loop, so a fire queued while it is up would
-    // stack a second one. Invalidating is the real stop; this guards the gap.
-    let asked = Cell::new(false);
-    let block = RcBlock::new(move |t: NonNull<NSTimer>| {
-        if asked.get() {
-            return;
-        }
-        if !(unsafe { CGPreflightListenEventAccess() } && ax_is_trusted()) {
-            return;
-        }
-        asked.set(true);
-        unsafe { t.as_ref().invalidate() };
-        // Whatever the answer, the state is no longer "a permission is missing".
-        permission_needed.store(false, Ordering::Relaxed);
-        restart_needed.store(true, Ordering::Relaxed);
-        let restart = menubar::show_choice_alert(
-            mtm,
-            "Permissions granted",
-            "keyboard-it can see both permissions now. macOS only applies them when the app \
-             starts, so one restart is all that is left.",
-            &["Restart now", "Later"],
-        ) == 0;
-        if restart {
-            relaunch_and_exit(mtm);
-        }
-    });
-    unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &block);
-    }
-}
-
-/// Guided first-run permission chain (replaces bare official prompts): Input
-/// Monitoring first; Accessibility follows on the next launch (each grant needs a
-/// relaunch anyway, and one system prompt at a time is less confusing). Returns
-/// true only when everything is ALREADY granted (no dialog shown); false when the
-/// user postponed — the caller then skips the duplicate tap-failure alert.
-fn permission_wizard(mtm: MainThreadMarker) -> bool {
-    if !unsafe { CGPreflightListenEventAccess() } {
-        return wizard_step(
-            mtm,
-            "Input Monitoring",
-            "Welcome to keyboard-it",
-            "keyboard-it forwards your keyboard and mouse to a Windows PC. macOS asks you \
-             to grant two permissions first:\n\n\
-             \u{2022} Input Monitoring — lets the app see keystrokes so it can forward them.\n\
-             \u{2022} Accessibility — lets the app keep those keystrokes from also typing \
-             on the Mac.\n\n\
-             Continue brings up the system prompt for Input Monitoring (Accessibility \
-             follows after a restart).\n\n\
-             macOS may also ask for Local Network access. Allow it — that is how keyboard-it \
-             finds your PC, and without it the PC list stays empty.",
-            &|| {
-                let _ = unsafe { CGRequestListenEventAccess() };
-            },
-            &|| unsafe { CGPreflightListenEventAccess() },
-            &open_input_monitoring_settings,
-        );
-    }
-    if !ax_is_trusted() {
-        return wizard_step(
-            mtm,
-            "Accessibility",
-            "One more permission",
-            "Input Monitoring is granted. The last permission is Accessibility, which lets \
-             keyboard-it hold keystrokes back from the Mac while you type on Windows.\n\n\
-             Continue brings up the system prompt.",
-            &|| {
-                let _ = ax_trusted_with_prompt();
-            },
-            &ax_is_trusted,
-            &open_accessibility_settings,
-        );
-    }
-    true
 }
 
 /// Channel capacity: while disconnected, callback events above this limit are DROPPED
@@ -365,6 +132,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     menubar::install_status_updater(
         mtm,
         menu_bar.status_item.clone(),
+        menu_bar.permissions_item.clone(),
         active_flag.clone(),
         conn_status.clone(),
         permission_needed.clone(),
@@ -479,16 +247,23 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         }
     });
 
-    // Guided permission flow FIRST (before the setup alert): on a fresh install the
-    // wizard walks through Input Monitoring and — after a self-relaunch — Accessibility,
-    // so the config alert below only appears once the relaunch cycle is over. false =
-    // the user postponed; remembered so the tap-failure path does not repeat the same
-    // explanation in a second alert.
-    let permissions_ok = permission_wizard(mtm);
+    // Permissions FIRST (before the setup alert). Unlike the old alert chain this is
+    // NOT modal: run() has to reach app.run() below, because the window is driven by
+    // its own timer. When both tap permissions are already granted nothing opens and
+    // startup stays silent — no window, no dialog, no mDNS browse.
+    let permissions_ok = permissions::tap_permissions_granted();
+    if !permissions_ok {
+        permissions::open(mtm);
+    }
 
     // First launch with an empty config: show VISIBLE instructions (stderr is invisible
     // in an LSUIElement .app) and take the user straight to the settings window.
-    if initial_conn == ConnStatus::ConfigNeeded {
+    // Gated on permissions: this alert is modal, so without the gate it would land on
+    // TOP of the permissions window and the user would face two things at once. A
+    // launch with missing permissions ends in a restart anyway, and initial_conn is
+    // still ConfigNeeded after it — the alert simply arrives one launch later, with a
+    // working app behind it.
+    if permissions_ok && initial_conn == ConnStatus::ConfigNeeded {
         let open = menubar::show_setup_alert(
             mtm,
             "keyboard-it — first-run setup",
@@ -727,34 +502,16 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         },
         Err(_) => {
             permission_needed.store(true, Ordering::Relaxed);
-            // When the wizard was postponed ("Later") this failure is expected and
-            // already explained — a second alert would just nag. Only surface the
-            // unexpected case: wizard says both granted, yet the tap still failed.
+            // When a permission was already missing at startup the window is on screen
+            // saying so — nothing to add. The case worth surfacing is the one that
+            // looks like the app is lying: both checks pass and the tap still failed,
+            // because the System Settings entry belongs to an earlier version of the
+            // binary. Hand that to the window rather than a modal alert: an NSAlert
+            // opened here runs a nested modal session that suppresses the very window
+            // its own button would go on to open.
             if permissions_ok {
-                // The "already switched ON" case is the one worth leading with,
-                // because it is the one that looks like the app is lying. macOS
-                // ties a permission to the exact binary it was granted to (for an
-                // unsigned app, its code hash), and every keyboard-it update is a
-                // different binary — so the row survives the update while the grant
-                // behind it does not. The switch reads ON, the app is denied, and
-                // nothing on screen connects the two.
-                let open = menubar::show_setup_alert(
-                    mtm,
-                    "keyboard-it — permission needed",
-                    "Keyboard capture could not start — macOS is not granting Input \
-                     Monitoring or Accessibility.\n\n\
-                     If keyboard-it already looks switched ON in those lists, the entry \
-                     belongs to an earlier version. macOS ties the permission to the exact \
-                     app it was granted to, and updating replaces it. Select keyboard-it in \
-                     the list, remove it with the \u{2212} button, then add it back with \u{002B} \
-                     \u{2014} or switch it off and on again.\n\n\
-                     If keyboard-it is not in the list at all, add it there.\n\n\
-                     Either way macOS applies the change only when the app restarts. \
-                     keyboard-it offers to restart itself as soon as it sees the permission.",
-                );
-                if open {
-                    open_input_monitoring_settings();
-                }
+                permissions::note_stale_grant();
+                permissions::open(mtm);
             }
             None
         }
@@ -765,7 +522,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // process start — so watch for it here rather than leaving the user to guess that
     // a relaunch is what turns their grant into a working app.
     if permission_needed.load(Ordering::Relaxed) {
-        install_permission_watcher(mtm, permission_needed.clone(), restart_needed.clone());
+        permissions::install_watcher(permission_needed.clone(), restart_needed.clone());
     }
 
     // Run AppKit AFTER the tap source is added to the main run loop. app.run() drives

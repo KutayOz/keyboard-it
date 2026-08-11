@@ -7,10 +7,10 @@
 //! about a second — no restart.
 //!
 //! Threading: AppKit objects are main-thread-only. Two background threads write
-//! shared state and never touch AppKit — the mDNS browser (an
-//! Arc<Mutex<Vec<DiscoveredPeer>>>) and the pairing worker (an
-//! Arc<Mutex<PairState>>) — and a 1 s main-thread NSTimer mirrors both into the
-//! window (same pattern as menubar::install_status_updater).
+//! shared state and never touch AppKit — the mDNS browser (crate::discovery, a
+//! process-wide singleton shared with the permissions window) and the pairing
+//! worker (an Arc<Mutex<PairState>>) — and a 1 s main-thread NSTimer mirrors
+//! both into the window (same pattern as menubar::install_status_updater).
 
 #![allow(non_snake_case)]
 
@@ -32,26 +32,8 @@ use objc2_foundation::{
     NSTimer,
 };
 
+use crate::discovery::{self, DiscoveredPeer};
 use crate::menubar::ConnStatus;
-
-/// One receiver found via mDNS (win-receiver advertises protocol::MDNS_SERVICE).
-/// `fullname` is the dedupe/removal key (ServiceRemoved only carries the fullname).
-#[derive(Clone, PartialEq, Eq)]
-struct DiscoveredPeer {
-    fullname: String,
-    name: String,
-    /// Resolved IP. Used to reach the PC now, and stored as the fallback address.
-    host: String,
-    /// The advertised ".local" name (trailing dot stripped). Preferred for the
-    /// stored config: macOS resolves it via mDNS, so the link survives the PC
-    /// getting a new DHCP lease.
-    hostname: String,
-    /// Session port (the SRV port).
-    port: u16,
-    /// Pairing port from the TXT record. `None` means the PC is running a build
-    /// from before pairing existed.
-    pair_port: Option<u16>,
-}
 
 /// What the pairing worker is doing, rendered by the 1 s timer. Kept as
 /// pre-rendered text because only the worker knows the peer name and the code,
@@ -93,6 +75,16 @@ pub fn set_conn_status_source(src: Arc<AtomicU8>) {
     let _ = CONN_STATUS.set(src);
 }
 
+/// Is there a live session with the PC right now? Read by the permissions window:
+/// an established TCP connection to a machine on this LAN is proof that Local
+/// Network access works, and it is the only such proof that does not depend on
+/// mDNS finding anything.
+pub fn is_connected() -> bool {
+    CONN_STATUS
+        .get()
+        .is_some_and(|s| ConnStatus::from_u8(s.load(Ordering::Relaxed)) == ConnStatus::Connected)
+}
+
 fn conn_status_text(s: ConnStatus) -> &'static str {
     match s {
         ConnStatus::ConfigNeeded => "Not paired — pick your PC below and click Pair & Connect.",
@@ -103,14 +95,6 @@ fn conn_status_text(s: ConnStatus) -> &'static str {
         ConnStatus::Unreachable => "Can't reach your PC — pick it again and Pair & Connect.",
     }
 }
-
-/// How long the mDNS browse may return nothing before the window stops saying
-/// "Searching your network…" and starts saying why. Long enough that a healthy
-/// network has answered several times over; short enough to beat the user's
-/// patience. On macOS 15+ the overwhelmingly likely cause of a permanently
-/// empty list is Local Network access, which has no API to query — the timeout
-/// IS the detection.
-const DISCOVERY_GRACE: Duration = Duration::from_secs(8);
 
 /// Open (create on first use) the settings window and bring it to the front.
 pub fn open(mtm: MainThreadMarker) {
@@ -147,11 +131,6 @@ struct Ivars {
     paired_label: Retained<NSTextField>,
     pair_button: Retained<NSButton>,
     unpair_button: Retained<NSButton>,
-    /// Written by the mDNS browser thread, read by the 1 s timer.
-    peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
-    /// When the browse started, so "still looking" can be told apart from
-    /// "nothing is ever going to arrive". See DISCOVERY_GRACE.
-    discovery_started: Instant,
     /// The list currently rendered in the popup; popupSelected: indexes into
     /// THIS (not `peers`) so a refresh between click and action cannot drift.
     shown_peers: RefCell<Vec<DiscoveredPeer>>,
@@ -316,9 +295,9 @@ impl SettingsController {
         content_view.addSubview(&unpair_button);
         content_view.addSubview(&autostart_check);
 
-        let peers = Arc::new(Mutex::new(Vec::new()));
-        spawn_browser(peers.clone());
-        let discovery_started = Instant::now();
+        // Idempotent: the permissions window may already have started the browse
+        // (and with it raised the Local Network prompt) — this is then a no-op.
+        discovery::start();
 
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window,
@@ -329,8 +308,6 @@ impl SettingsController {
             paired_label,
             pair_button: pair_button.clone(),
             unpair_button: unpair_button.clone(),
-            peers,
-            discovery_started,
             shown_peers: RefCell::new(Vec::new()),
             pair_state: Arc::new(Mutex::new(PairState::Idle)),
             status_hold: Cell::new(None),
@@ -411,9 +388,7 @@ impl SettingsController {
     /// True once the browse has run long enough with nothing to show that
     /// "Searching your network…" has stopped being an honest answer.
     fn discovery_stalled(&self) -> bool {
-        let iv = self.ivars();
-        iv.discovery_started.elapsed() >= DISCOVERY_GRACE
-            && iv.peers.lock().map(|p| p.is_empty()).unwrap_or(false)
+        discovery::stalled()
     }
 
     /// The line under the popup: what to do next, or why there is nothing to do.
@@ -512,8 +487,7 @@ impl SettingsController {
     /// Rebuild the popup when the discovered list changed since the last render.
     fn refresh_popup(&self) {
         let iv = self.ivars();
-        let mut now: Vec<DiscoveredPeer> =
-            iv.peers.lock().map(|g| g.clone()).unwrap_or_default();
+        let mut now: Vec<DiscoveredPeer> = discovery::peers();
         // Stable order: the browser thread appends in resolve order, which would
         // make entries jump around between refreshes.
         now.sort_by(|a, b| a.name.cmp(&b.name));
@@ -709,70 +683,3 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
     });
 }
 
-/// Browse protocol::MDNS_SERVICE in the background for the window's lifetime.
-/// Only the shared Vec is touched from here — AppKit stays on the main thread.
-fn spawn_browser(peers: Arc<Mutex<Vec<DiscoveredPeer>>>) {
-    std::thread::spawn(move || {
-        use mdns_sd::{ServiceDaemon, ServiceEvent};
-        let daemon = match ServiceDaemon::new() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("mDNS discovery unavailable: {e}");
-                return;
-            }
-        };
-        let rx = match daemon.browse(protocol::MDNS_SERVICE) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("mDNS browse failed: {e}");
-                return;
-            }
-        };
-        while let Ok(event) = rx.recv() {
-            match event {
-                ServiceEvent::ServiceResolved(info) => {
-                    let addrs: Vec<std::net::IpAddr> =
-                        info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
-                    // Rank, do not `min()`. Four of the five records a receiver
-                    // advertises are typically unreachable, and the old "filter to
-                    // IPv4 first" only hid that: one receiver with no A record and
-                    // the fallback picks `::1`. See protocol::addr_rank.
-                    let Some(ip) = protocol::pick_service_addr(addrs.iter()) else { continue };
-                    let fullname = info.get_fullname().to_string();
-                    let name = fullname
-                        .strip_suffix(protocol::MDNS_SERVICE)
-                        .map(|s| s.trim_end_matches('.').to_string())
-                        .unwrap_or_else(|| fullname.clone());
-                    // The advertised ".local." name outlives any particular DHCP
-                    // lease, so it is what gets stored once pairing succeeds.
-                    let hostname = info.get_hostname().trim_end_matches('.').to_string();
-                    // Absent on receivers built before pairing existed.
-                    let pair_port = info
-                        .get_property_val_str(protocol::MDNS_TXT_PAIR_PORT)
-                        .and_then(|s| s.parse::<u16>().ok())
-                        .filter(|p| *p != 0);
-                    let peer = DiscoveredPeer {
-                        fullname: fullname.clone(),
-                        name,
-                        host: ip.to_string(),
-                        hostname,
-                        port: info.get_port(),
-                        pair_port,
-                    };
-                    if let Ok(mut list) = peers.lock() {
-                        match list.iter_mut().find(|p| p.fullname == fullname) {
-                            Some(existing) => *existing = peer,
-                            None => list.push(peer),
-                        }
-                    }
-                }
-                ServiceEvent::ServiceRemoved(_ty, fullname) => {
-                    if let Ok(mut list) = peers.lock() {
-                        list.retain(|p| p.fullname != fullname);
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
-}

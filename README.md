@@ -70,21 +70,69 @@ If you install from the `.dmg` instead, macOS blocks the unsigned app on first o
   **Open Anyway** → open the app again.
 - macOS 14 and earlier: right-click the app in Applications → Open → Open.
 
-On first launch the app walks you through the permissions it needs — the app cannot capture
-input without them:
+On first launch a **Permissions** window opens and walks through everything macOS asks for,
+in order, showing which ones are done as you go:
 
-1. System Settings → Privacy & Security → **Input Monitoring** → enable keyboard-it.
-2. System Settings → Privacy & Security → **Accessibility** → enable keyboard-it.
-3. System Settings → Keyboard → "Press fn key to" → **Do Nothing**. Otherwise macOS grabs
-   double-Fn for Dictation or the emoji picker and the toggle misfires.
+1. **Input Monitoring** — lets the app see keystrokes so it can forward them.
+2. **Accessibility** — lets it hold those keystrokes back from the Mac while you type on Windows.
+3. **Local Network** — lets it find your PC, so you never type an IP address. macOS exposes
+   no API for reading this one, so the window can only confirm it once something on the
+   network answers (or once a session with the PC is up). If it stays unconfirmed, nothing
+   is necessarily wrong — carry on and pair.
 
-The app relaunches itself once permissions are granted (they only apply to a freshly
-launched process). Permissions are tied to the binary's path, so grant them again if you
-move the `.app`.
+Each system prompt appears on its own as the previous permission lands; the window ends with
+a single **Restart** (macOS only applies these to a freshly launched process). Reopen it any
+time from the menu bar.
 
-The app lives in the menu bar (no Dock icon) with three entries: **Settings** opens the
-settings window, **Start at Login** toggles a LaunchAgent, and **Quit** exits and restores
-normal cursor behavior.
+#### If macOS never asks, or keyboard-it looks switched on but still cannot capture
+
+This is the cost of an unsigned build, not a bug in the grant. macOS binds Input Monitoring
+and Accessibility to a *designated requirement*, and with an ad-hoc signature that requirement
+is the binary's own code hash — so every new build is a different app to macOS. The old row
+survives in System Settings while the approval behind it does not, and because macOS keeps
+exactly one saved answer per bundle identifier, it never prompts again.
+
+The permissions window detects both dead ends and says so. The cure either way:
+
+- In System Settings → Privacy & Security → the relevant list: select keyboard-it, remove it
+  with **−**, add it back with **+**, then restart the app. Or
+- run the command the window's **Copy reset command** button puts on your clipboard:
+  `sudo tccutil reset All com.keyboard-it.keyboard-it` (it needs root — these records live in
+  the system TCC database, which is why the app cannot clear them itself), then relaunch.
+
+`packaging/mac/package.sh` now pins the requirement to the bundle identifier instead
+(`codesign -r='designated => identifier "com.keyboard-it.keyboard-it"'`), so builds from
+this repo keep their permissions from one version to the next. You can see what any build
+asks for:
+
+```bash
+codesign -d -r- /Applications/keyboard-it.app
+```
+
+`identifier "…"` is good; `cdhash H"…"` is a build that will lose its permissions on the
+next update. Note the trade-off: an identifier-only requirement would also be satisfied by
+any other binary claiming that bundle identifier. Signing with a certificate is stricter —
+the requirement is then both stable *and* scoped to that certificate:
+
+1. Keychain Access → Certificate Assistant → **Create a Certificate…** → name `keyboard-it`,
+   type **Code Signing**, self-signed.
+2. Build with it:
+
+```bash
+KEYBOARD_IT_SIGN_ID=keyboard-it packaging/mac/package.sh
+```
+
+One-time note when moving off an old build: the permission macOS already saved still carries
+the *old* requirement, so it has to be cleared once with `sudo tccutil reset All
+com.keyboard-it.keyboard-it` before the new one can be granted.
+
+One thing the app cannot set for you: System Settings → Keyboard → "Press fn key to" →
+**Do Nothing**. Otherwise macOS grabs double-Fn for Dictation or the emoji picker and the
+toggle misfires.
+
+The app lives in the menu bar (no Dock icon): **Permissions** reopens the window above,
+**Settings** opens the settings window, **Start at Login** toggles a LaunchAgent, and
+**Quit** exits and restores normal cursor behavior.
 
 ### Windows
 

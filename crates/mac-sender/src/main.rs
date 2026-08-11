@@ -17,9 +17,13 @@ mod autostart;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
+mod discovery;
+#[cfg(target_os = "macos")]
 mod keymap;
 #[cfg(target_os = "macos")]
 mod menubar;
+#[cfg(target_os = "macos")]
+mod permissions;
 #[cfg(target_os = "macos")]
 mod settings;
 
