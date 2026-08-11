@@ -116,24 +116,6 @@ pub fn show_setup_alert(mtm: MainThreadMarker, title: &str, text: &str) -> bool 
     alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
-/// N-button modal dialog; buttons[0] is the default (Return key). Returns the
-/// 0-based index of the clicked button. The permission wizard builds its
-/// Continue/check/Later chains from this.
-pub fn show_choice_alert(mtm: MainThreadMarker, title: &str, text: &str, buttons: &[&str]) -> usize {
-    let app = NSApplication::sharedApplication(mtm);
-    unsafe {
-        let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
-    }
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str(title));
-    alert.setInformativeText(&NSString::from_str(text));
-    for b in buttons {
-        let _ = alert.addButtonWithTitle(&NSString::from_str(b));
-    }
-    // Buttons answer NSAlertFirstButtonReturn + index, in the order they were added.
-    (alert.runModal() - objc2_app_kit::NSAlertFirstButtonReturn).max(0) as usize
-}
-
 /// While ACTIVE, CGAssociateMouseAndMouseCursorPosition(0) freezes the cursor.
 /// Without re-associating on exit, the cursor stays frozen system-wide.
 fn reassociate_cursor() {
@@ -178,6 +160,14 @@ define_class!(
             crate::settings::open(self.mtm());
         }
 
+        // Menu "Permissions..." -> the permissions window. Reachable at any time,
+        // not just on first run: a permission can be revoked in System Settings
+        // long after setup, and the ⛔/🔄 title needs somewhere to lead.
+        #[unsafe(method(permissions:))]
+        fn permissions(&self, _sender: Option<&AnyObject>) {
+            crate::permissions::open(self.mtm());
+        }
+
         // Menu "Start at Login" -> toggle the LaunchAgent and update the checkmark.
         // sender = the clicked NSMenuItem; setState reflects the checkmark.
         #[unsafe(method(toggleStartup:))]
@@ -206,6 +196,9 @@ impl QuitDelegate {
 /// alive without dropping them — if dropped, the item disappears from the menu bar.
 pub struct MenuBar {
     pub status_item: Retained<NSStatusItem>,
+    /// Retitled by install_status_updater, so the menu says what the ⛔/🔄 glyph
+    /// means instead of making the user open the window to find out.
+    pub permissions_item: Retained<NSMenuItem>,
     _delegate: Retained<QuitDelegate>,
 }
 
@@ -227,6 +220,17 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     let menu = NSMenu::new(mtm);
+    let permissions_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            ns_string!("Permissions\u{2026}"),
+            Some(sel!(permissions:)),
+            ns_string!(""),
+        )
+    };
+    unsafe { permissions_item.setTarget(Some(&delegate)) };
+    menu.addItem(&permissions_item);
+
     let settings = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -268,6 +272,7 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
 
     MenuBar {
         status_item,
+        permissions_item,
         _delegate: delegate,
     }
 }
@@ -278,6 +283,7 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
 pub fn install_status_updater(
     mtm: MainThreadMarker,
     status_item: Retained<NSStatusItem>,
+    permissions_item: Retained<NSMenuItem>,
     active: Arc<AtomicBool>,
     conn: Arc<AtomicU8>,
     permission_needed: Arc<AtomicBool>,
@@ -309,6 +315,16 @@ pub fn install_status_updater(
                 };
                 button.setTitle(title);
             }
+            // Same precedence as the glyph, spelled out: an emoji alone cannot
+            // say whether the fix is "grant it" or "restart to apply it".
+            let item_title = if now.3 {
+                ns_string!("Restart to apply permissions\u{2026}")
+            } else if now.2 {
+                ns_string!("Permissions needed\u{2026}")
+            } else {
+                ns_string!("Permissions\u{2026}")
+            };
+            permissions_item.setTitle(item_title);
         }
     });
     unsafe {
