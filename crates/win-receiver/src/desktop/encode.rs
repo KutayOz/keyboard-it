@@ -1,9 +1,8 @@
 //! Native Media Foundation H.264. Async hardware transforms are driven by their
 //! event queue; software is a fallback, with bounded, low-latency output draining.
-use std::{
-    mem::ManuallyDrop,
-    time::{Duration, Instant},
-};
+use protocol::stream::StreamSettings;
+use std::{mem::ManuallyDrop, time::Instant};
+use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::{
     core::{Interface, Result},
@@ -25,11 +24,20 @@ impl Drop for Runtime {
 pub struct Encoder {
     transform: IMFTransform,
     events: Option<IMFMediaEventGenerator>,
-    timestamp: i64,
+    clock: Instant,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+    gpu: Option<Gpu>,
     pub width: u32,
     pub height: u32,
     pub hardware: bool,
     input_credit: u32,
+    pub skipped: u32,
+}
+struct Gpu {
+    converter: super::gpu::Converter,
+    allocator: IMFVideoSampleAllocatorEx,
+    _manager: IMFDXGIDeviceManager,
 }
 impl Encoder {
     pub fn initialize() -> Result<Runtime> {
@@ -42,19 +50,34 @@ impl Encoder {
         }
         Ok(Runtime)
     }
-    pub fn new(w: u32, h: u32, allow_hardware: bool) -> Result<Self> {
-        let scale = (4096.0 / w as f64).min(4096.0 / h as f64).min(1.0);
-        let mut size = (
-            ((w as f64 * scale) as u32 & !1).max(2),
-            ((h as f64 * scale) as u32 & !1).max(2),
-        );
+    pub fn new(
+        w: u32,
+        h: u32,
+        settings: StreamSettings,
+        device: Option<&ID3D11Device>,
+        allow_hardware: bool,
+    ) -> Result<Self> {
+        let mut size = settings.dimensions(w, h);
         let mut last =
             windows::core::Error::new(MF_E_TOPO_CODEC_NOT_FOUND, "No supported H.264 encoder");
+        let mut rates = vec![settings.fps, settings.fps.min(60), settings.fps.min(30)];
+        rates.dedup();
         loop {
-            for hardware in [true, false].into_iter().filter(|h| !*h || allow_hardware) {
-                match Self::try_new(size.0, size.1, hardware) {
-                    Ok(e) => return Ok(e),
-                    Err(e) => last = e,
+            // Prefer the source dimensions at a lower supported FPS over
+            // silently reducing resolution to obtain the requested frame rate.
+            for fps in &rates {
+                let settings = StreamSettings {
+                    fps: *fps,
+                    ..settings
+                };
+                for (hardware, gpu_device) in [(true, device), (true, None), (false, None)] {
+                    if hardware && !allow_hardware {
+                        continue;
+                    }
+                    match Self::try_new(size.0, size.1, settings, hardware, gpu_device) {
+                        Ok(e) => return Ok(e),
+                        Err(e) => last = e,
+                    }
                 }
             }
             if size.0 <= 1280 && size.1 <= 720 {
@@ -63,7 +86,13 @@ impl Encoder {
             size = ((size.0 * 3 / 4 & !1).max(2), (size.1 * 3 / 4 & !1).max(2));
         }
     }
-    fn try_new(w: u32, h: u32, hardware: bool) -> Result<Self> {
+    fn try_new(
+        w: u32,
+        h: u32,
+        settings: StreamSettings,
+        hardware: bool,
+        device: Option<&ID3D11Device>,
+    ) -> Result<Self> {
         unsafe {
             let input = MFT_REGISTER_TYPE_INFO {
                 guidMajorType: MFMediaType_Video,
@@ -119,31 +148,84 @@ impl Encoder {
                     if let Some(a) = &attrs {
                         let _ = a.SetUINT32(&MF_LOW_LATENCY, 1);
                     }
+                    let manager = if let Some(device) = device {
+                        if attrs
+                            .as_ref()
+                            .and_then(|a| a.GetUINT32(&MF_SA_D3D11_AWARE).ok())
+                            .unwrap_or(0)
+                            == 0
+                        {
+                            return Err(windows::core::Error::new(
+                                MF_E_UNSUPPORTED_D3D_TYPE,
+                                "Encoder does not accept GPU surfaces",
+                            ));
+                        }
+                        let mut token = 0;
+                        let mut manager = None;
+                        MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+                        let manager = manager.unwrap();
+                        manager.ResetDevice(device, token)?;
+                        t.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
+                        Some(manager)
+                    } else {
+                        None
+                    };
                     if let Ok(codec) = t.cast::<ICodecAPI>() {
                         let _ = codec.SetValue(&CODECAPI_AVLowLatencyMode, &boolean(true));
                         let _ = codec.SetValue(&CODECAPI_AVEncCommonRealTime, &boolean(true));
                         let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &integer(0));
-                        let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &integer(30));
+                        let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &integer(settings.fps));
+                        let _ = codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &integer(0)); // CBR
+                        let _ = codec.SetValue(
+                            &CODECAPI_AVEncCommonMeanBitRate,
+                            &integer(settings.bitrate(w, h) * 1000),
+                        );
                     }
-                    let out = media_type(w, h, &MFVideoFormat_H264)?;
-                    out.SetUINT32(
-                        &MF_MT_AVG_BITRATE,
-                        (w as u64 * h as u64 * 6).clamp(8_000_000, 60_000_000) as u32,
-                    )?;
+                    let out =
+                        media_type(w, h, settings.fps, &MFVideoFormat_H264, device.is_some())?;
+                    out.SetUINT32(&MF_MT_AVG_BITRATE, settings.bitrate(w, h) * 1000)?;
                     out.SetUINT32(&MF_MT_MPEG2_PROFILE, 100)?;
                     t.SetOutputType(0, &out, 0)?;
-                    t.SetInputType(0, &media_type(w, h, &MFVideoFormat_NV12)?, 0)?;
+                    let input_type =
+                        media_type(w, h, settings.fps, &MFVideoFormat_NV12, device.is_some())?;
+                    t.SetInputType(0, &input_type, 0)?;
+                    let gpu = if let (Some(device), Some(manager)) = (device, manager) {
+                        let mut raw = std::ptr::null_mut();
+                        MFCreateVideoSampleAllocatorEx(&IMFVideoSampleAllocatorEx::IID, &mut raw)?;
+                        let allocator = IMFVideoSampleAllocatorEx::from_raw(raw);
+                        allocator.SetDirectXManager(&manager)?;
+                        let mut attrs = None;
+                        MFCreateAttributes(&mut attrs, 2)?;
+                        let attrs = attrs.unwrap();
+                        attrs
+                            .SetUINT32(&MF_SA_D3D11_BINDFLAGS, D3D11_BIND_RENDER_TARGET.0 as u32)?;
+                        attrs.SetUINT32(&MF_SA_D3D11_USAGE, D3D11_USAGE_DEFAULT.0 as u32)?;
+                        // Samples return to this bounded pool only after the MFT releases
+                        // them; in-flight GPU surfaces are never overwritten.
+                        allocator.InitializeSampleAllocatorEx(2, 4, &attrs, &input_type)?;
+                        Some(Gpu {
+                            converter: super::gpu::Converter::new(device, w, h, settings.fps)?,
+                            allocator,
+                            _manager: manager,
+                        })
+                    } else {
+                        None
+                    };
                     t.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
                     t.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
                     let events = if asynchronous { Some(t.cast()?) } else { None };
                     Ok(Self {
                         transform: t,
                         events,
-                        timestamp: 0,
+                        clock: Instant::now(),
+                        fps: settings.fps,
+                        bitrate_kbps: settings.bitrate(w, h),
+                        gpu,
                         width: w,
                         height: h,
                         hardware,
                         input_credit: 0,
+                        skipped: 0,
                     })
                 })();
                 match attempt {
@@ -175,48 +257,57 @@ impl Encoder {
             buffer.SetCurrentLength(data.len() as u32)?;
             let sample = MFCreateSample()?;
             sample.AddBuffer(&buffer)?;
-            sample.SetSampleTime(self.timestamp)?;
-            sample.SetSampleDuration(10_000_000 / 30)?;
-            self.timestamp += 10_000_000 / 30;
-            let deadline = Instant::now() + Duration::from_millis(100);
-            let mut output = vec![];
-            if self.events.is_some() {
-                while self.input_credit == 0 && Instant::now() < deadline {
-                    if !self.poll_event(&mut output)? {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                }
-                // Dropping an unencoded capture is safe. Encoded reference frames are
-                // never discarded, so the H.264 decoder remains synchronized.
-                if self.input_credit == 0 {
-                    return Ok(output);
+            self.submit(&sample)
+        }
+    }
+    pub fn uses_gpu_surfaces(&self) -> bool {
+        self.gpu.is_some()
+    }
+    pub fn encode_gpu(&mut self, frame: &super::gpu::Frame<'_>) -> Result<Vec<Vec<u8>>> {
+        // Drain completion events even when no surface is available. Allocation
+        // pressure discards a capture, never an encoded reference frame.
+        let mut output = self.poll_available()?;
+        if self.events.is_some() && self.input_credit == 0 {
+            self.skipped = self.skipped.saturating_add(1);
+            return Ok(output);
+        }
+        let Some(gpu) = &mut self.gpu else {
+            unreachable!()
+        };
+        let sample = match unsafe { gpu.allocator.AllocateSample() } {
+            Ok(sample) => sample,
+            Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => {
+                self.skipped = self.skipped.saturating_add(1);
+                return Ok(output);
+            }
+            Err(e) => return Err(e),
+        };
+        gpu.converter.convert(frame, &sample)?;
+        output.extend(unsafe { self.submit(&sample)? });
+        Ok(output)
+    }
+    fn poll_available(&mut self) -> Result<Vec<Vec<u8>>> {
+        let mut output = vec![];
+        if self.events.is_some() {
+            for _ in 0..64 {
+                if !unsafe { self.poll_event(&mut output)? } {
+                    break;
                 }
             }
-            match self.transform.ProcessInput(0, &sample, 0) {
-                Err(e) if e.code() == MF_E_NOTACCEPTING && self.events.is_none() => {
-                    for _ in 0..16 {
-                        if let Some(bytes) = self.drain()? {
-                            output.push(bytes);
-                        } else {
-                            break;
-                        }
-                    }
-                    self.transform.ProcessInput(0, &sample, 0)?;
-                }
-                other => other?,
-            }
-            if self.events.is_some() {
-                self.input_credit -= 1;
-                let count = output.len();
-                while Instant::now() < deadline && output.len() == count {
-                    if !self.poll_event(&mut output)? {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    if self.input_credit > 0 {
-                        break;
-                    }
-                }
-            } else {
+        }
+        Ok(output)
+    }
+    unsafe fn submit(&mut self, sample: &IMFSample) -> Result<Vec<Vec<u8>>> {
+        let mut output = self.poll_available()?;
+        if self.events.is_some() && self.input_credit == 0 {
+            self.skipped = self.skipped.saturating_add(1);
+            return Ok(output);
+        }
+        sample
+            .SetSampleTime((self.clock.elapsed().as_nanos() / 100).min(i64::MAX as u128) as i64)?;
+        sample.SetSampleDuration(10_000_000 / self.fps as i64)?;
+        match self.transform.ProcessInput(0, sample, 0) {
+            Err(e) if e.code() == MF_E_NOTACCEPTING && self.events.is_none() => {
                 for _ in 0..16 {
                     if let Some(bytes) = self.drain()? {
                         output.push(bytes);
@@ -224,9 +315,23 @@ impl Encoder {
                         break;
                     }
                 }
+                self.transform.ProcessInput(0, sample, 0)?;
             }
-            Ok(output)
+            other => other?,
         }
+        if self.events.is_some() {
+            self.input_credit -= 1;
+            output.extend(self.poll_available()?);
+        } else {
+            for _ in 0..16 {
+                if let Some(bytes) = self.drain()? {
+                    output.push(bytes);
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(output)
     }
     unsafe fn poll_event(&mut self, output: &mut Vec<Vec<u8>>) -> Result<bool> {
         match self
@@ -325,13 +430,21 @@ impl Drop for Encoder {
         }
     }
 }
-unsafe fn media_type(w: u32, h: u32, subtype: &windows::core::GUID) -> Result<IMFMediaType> {
+unsafe fn media_type(
+    w: u32,
+    h: u32,
+    fps: u32,
+    subtype: &windows::core::GUID,
+    gpu: bool,
+) -> Result<IMFMediaType> {
     let t = MFCreateMediaType()?;
     t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
     t.SetGUID(&MF_MT_SUBTYPE, subtype)?;
     t.SetUINT64(&MF_MT_FRAME_SIZE, ((w as u64) << 32) | h as u64)?;
-    t.SetUINT64(&MF_MT_FRAME_RATE, (30u64 << 32) | 1)?;
+    t.SetUINT64(&MF_MT_FRAME_RATE, ((fps as u64) << 32) | 1)?;
     t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
+    t.SetUINT32(&MF_MT_YUV_MATRIX, if gpu { 1 } else { 2 })?;
+    t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, 2)?;
     t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
     Ok(t)
 }
@@ -402,7 +515,8 @@ mod tests {
     #[test]
     fn native_software_encoder_emits_decodable_h264_access_units() {
         let _runtime = Encoder::initialize().unwrap();
-        let mut encoder = Encoder::try_new(320, 180, false).unwrap();
+        let mut encoder =
+            Encoder::try_new(320, 180, StreamSettings::default(), false, None).unwrap();
         encoder.force_keyframe();
         let pixels = [32, 64, 128, 255].repeat(320 * 180);
         let mut encoded = vec![];

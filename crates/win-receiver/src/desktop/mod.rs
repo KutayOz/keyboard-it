@@ -19,6 +19,8 @@ mod capture;
 mod clipboard;
 #[cfg(windows)]
 mod encode;
+#[cfg(windows)]
+mod gpu;
 
 pub struct Handle {
     pub port: u16,
@@ -132,6 +134,8 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
         owner: u64,
         display: Option<desktop::Display>,
         ready: bool,
+        settings: protocol::stream::StreamSettings,
+        pong: Option<u64>,
     }
     let activity = Arc::new(Mutex::new(Activity {
         visible: false,
@@ -140,6 +144,8 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
         owner: initial_owner,
         display: None,
         ready: false,
+        settings: Default::default(),
+        pong: None,
     }));
     let alive = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::sync_channel(32);
@@ -161,6 +167,15 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
             }
             match msg {
                 Message::Heartbeat => {}
+                Message::Ping(id) => a.pong = Some(id),
+                Message::Configure(settings) => {
+                    if a.settings != settings {
+                        a.settings = settings;
+                        a.epoch += 1;
+                        a.ready = false;
+                        crate::inject::release(a.owner);
+                    }
+                }
                 Message::Active { visible, clipboard } => {
                     if visible != a.visible || clipboard != a.clipboard {
                         a.epoch += 1;
@@ -206,12 +221,20 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
         let mut frame_id = 0;
         let mut pipeline = None;
         let mut allow_hardware = true;
+        let mut allow_gpu = true;
         let mut last_output = Instant::now();
         let mut heartbeat = Instant::now() - Duration::from_secs(2);
         let mut retry = Instant::now();
-        let mut interval = Duration::from_millis(33);
+        let mut pacer = protocol::stream::FramePacer::new(Default::default(), Instant::now());
+        let mut report = Instant::now();
+        let mut stats = desktop::StreamStats::default();
+        let mut stat_frames = 0u64;
+        let mut stat_bytes = 0u64;
+        let mut stat_attempts = 0u64;
+        let mut capture_us = 0u64;
+        let mut encode_us = 0u64;
+        let mut send_us = 0u64;
         while alive.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
-            let started = Instant::now();
             if let Some(c) = &clipboard {
                 c.pump();
             }
@@ -219,10 +242,13 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                 writer.send(&Message::Heartbeat)?;
                 heartbeat = Instant::now();
             }
-            let (visible, share, now_epoch) = {
-                let a = activity.lock().unwrap();
-                (a.visible, a.clipboard, a.epoch)
+            let (visible, share, now_epoch, settings, pong) = {
+                let mut a = activity.lock().unwrap();
+                (a.visible, a.clipboard, a.epoch, a.settings, a.pong.take())
             };
+            if let Some(id) = pong {
+                writer.send(&Message::Pong(id))?;
+            }
             if epoch != now_epoch {
                 epoch = now_epoch;
                 assembly.clear();
@@ -240,8 +266,14 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
             }
             if pipeline.is_none() && Instant::now() >= retry {
                 match capture::Capture::new().and_then(|cap| {
-                    encode::Encoder::new(cap.display.width, cap.display.height, allow_hardware)
-                        .map(|enc| (cap, enc))
+                    encode::Encoder::new(
+                        cap.display.width,
+                        cap.display.height,
+                        settings,
+                        if allow_gpu { Some(&cap.device) } else { None },
+                        allow_hardware,
+                    )
+                    .map(|enc| (cap, enc))
                 }) {
                     Ok((cap, enc)) => {
                         let mut d = cap.display.clone();
@@ -249,16 +281,36 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                         d.height = enc.height;
                         writer.send(&Message::Display(d.clone()))?;
                         writer.send(&Message::Status(format!(
-                            "{} × {} · H.264 · {}",
+                            "{} × {} · {} FPS · {} Mbps · H.264 · {}",
                             d.width,
                             d.height,
-                            if enc.hardware { "GPU" } else { "CPU" }
+                            enc.fps,
+                            enc.bitrate_kbps / 1000,
+                            if enc.uses_gpu_surfaces() {
+                                "GPU yüzeyleri"
+                            } else if enc.hardware {
+                                "GPU kodlayıcı / CPU dönüşümü"
+                            } else {
+                                "CPU"
+                            }
                         )))?;
                         activity.lock().unwrap().display = Some(d);
                         enc.force_keyframe();
+                        let effective = protocol::stream::StreamSettings {
+                            fps: enc.fps,
+                            ..settings
+                        };
                         pipeline = Some((cap, enc));
                         last_output = Instant::now();
-                        interval = Duration::from_millis(33);
+                        pacer = protocol::stream::FramePacer::new(effective, Instant::now());
+                        report = Instant::now();
+                        stats = Default::default();
+                        stat_frames = 0;
+                        stat_bytes = 0;
+                        stat_attempts = 0;
+                        capture_us = 0;
+                        encode_us = 0;
+                        send_us = 0;
                     }
                     Err(e) => {
                         writer.send(&Message::Status(format!("Windows ekranı kullanılamıyor. Kilidi veya ekran bağlantısını kontrol edin. ({})",e.code())))?;
@@ -267,22 +319,55 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                 }
             }
             if let Some((cap, enc)) = &mut pipeline {
-                let encoded = match cap.frame() {
-                    Ok(Some(p)) => {
-                        let result =
-                            enc.encode(&p, cap.display.source_width, cap.display.source_height);
-                        if result.is_err() && enc.hardware {
-                            allow_hardware = false;
+                let before_capture = Instant::now();
+                let mut capture_failed = false;
+                let encoded = if enc.uses_gpu_surfaces() {
+                    match cap.gpu_frame() {
+                        Ok(frame) => {
+                            capture_us += before_capture.elapsed().as_micros() as u64;
+                            let before_encode = Instant::now();
+                            let result = match frame {
+                                Some(frame) => enc.encode_gpu(&frame),
+                                None => Ok(vec![]),
+                            };
+                            encode_us += before_encode.elapsed().as_micros() as u64;
+                            result
                         }
-                        result
+                        Err(e) => {
+                            capture_failed = true;
+                            Err(e)
+                        }
                     }
-                    Ok(None) => Ok(vec![]),
-                    Err(e) => Err(e),
+                } else {
+                    match cap.frame() {
+                        Ok(frame) => {
+                            capture_us += before_capture.elapsed().as_micros() as u64;
+                            let before_encode = Instant::now();
+                            let result = match frame {
+                                Some(p) => enc.encode(
+                                    &p,
+                                    cap.display.source_width,
+                                    cap.display.source_height,
+                                ),
+                                None => Ok(vec![]),
+                            };
+                            encode_us += before_encode.elapsed().as_micros() as u64;
+                            result
+                        }
+                        Err(e) => {
+                            capture_failed = true;
+                            Err(e)
+                        }
+                    }
                 };
+                stat_attempts += 1;
                 match encoded {
                     Ok(frames) if !frames.is_empty() => {
                         last_output = Instant::now();
+                        let before_send = Instant::now();
                         for data in frames {
+                            stat_frames += 1;
+                            stat_bytes += data.len() as u64;
                             frame_id += 1;
                             for msg in desktop::video_chunks(
                                 frame_id,
@@ -292,19 +377,19 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                                 writer.send(&msg)?;
                             }
                         }
+                        send_us += before_send.elapsed().as_micros() as u64;
                         let mut a = activity.lock().unwrap();
                         if a.epoch == epoch && a.visible {
                             a.ready = true;
                         }
-                        // Adapt capture rate before sacrificing source resolution.
-                        if started.elapsed() > interval {
-                            interval = (started.elapsed() + Duration::from_millis(2))
-                                .min(Duration::from_millis(200));
-                        }
                     }
                     Ok(_) if last_output.elapsed() > Duration::from_secs(2) => {
-                        if enc.hardware {
-                            allow_hardware = false;
+                        if !capture_failed {
+                            if enc.uses_gpu_surfaces() {
+                                allow_gpu = false;
+                            } else if enc.hardware {
+                                allow_hardware = false;
+                            }
                         }
                         let mut a = activity.lock().unwrap();
                         a.ready = false;
@@ -317,7 +402,15 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                         ))?;
                     }
                     Ok(_) => {}
-                    Err(_) => {
+                    Err(e) => {
+                        crate::diag::plog!("desktop pipeline error: {e}");
+                        if !capture_failed {
+                            if enc.uses_gpu_surfaces() {
+                                allow_gpu = false;
+                            } else if enc.hardware {
+                                allow_hardware = false;
+                            }
+                        }
                         let mut a = activity.lock().unwrap();
                         a.ready = false;
                         crate::inject::release(a.owner);
@@ -360,7 +453,31 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                     }
                 }
             }
-            thread::sleep(interval.saturating_sub(started.elapsed()));
+            if report.elapsed() >= Duration::from_secs(1) && pipeline.is_some() {
+                let seconds = report.elapsed().as_secs_f64();
+                stats.fps_milli = (stat_frames as f64 * 1000.0 / seconds) as u32;
+                stats.bitrate_kbps = (stat_bytes as f64 * 8.0 / seconds / 1000.0) as u32;
+                stats.capture_us = (capture_us / stat_attempts.max(1)).min(u32::MAX as u64) as u32;
+                stats.encode_us = (encode_us / stat_attempts.max(1)).min(u32::MAX as u64) as u32;
+                stats.send_us = (send_us / stat_frames.max(1)).min(u32::MAX as u64) as u32;
+                stats.skipped = pipeline
+                    .as_mut()
+                    .map(|(_, e)| std::mem::take(&mut e.skipped))
+                    .unwrap_or(0);
+                writer.send(&Message::Stats(stats))?;
+                report = Instant::now();
+                stat_frames = 0;
+                stat_bytes = 0;
+                stat_attempts = 0;
+                capture_us = 0;
+                encode_us = 0;
+                send_us = 0;
+            }
+            if pipeline.is_some() {
+                thread::sleep(pacer.finish(Instant::now()));
+            } else {
+                thread::sleep(Duration::from_millis(10));
+            }
         }
         Ok(())
     })();

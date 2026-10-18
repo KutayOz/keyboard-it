@@ -29,6 +29,41 @@ and a missing active monitor cannot be controlled. The viewer shows a status and
 capture when the normal desktop is restored. No additional Mac Screen Recording permission
 is required because the captured screen is on Windows.
 
+## Picture quality and performance (0.5.0)
+
+Both applications must be updated to 0.5.0 for desktop protocol v2. Saved pairing keys
+are preserved. Older receivers still support **Yalnız klavye/fare modu**.
+
+The Mac menu **Görüntü kalitesi** offers:
+
+| Profile | Maximum dimensions | Target | Bitrate |
+| --- | --- | --- | --- |
+| Doğal çözünürlük · 60 FPS (default) | Source, capped proportionally at 4096 | 60 FPS | Automatic, based on actual dimensions/FPS |
+| Doğal çözünürlük · 120 FPS | Same | 120 FPS | Automatic |
+| 1080p60 · 20 Mbps | 1920×1080, no upscaling | 60 FPS | 20 Mbps |
+| 1440p60 · 40 Mbps | 2560×1440, no upscaling | 60 FPS | 40 Mbps |
+
+Changing a profile reconnects without replacing or focusing the viewer. Hardware, active
+Windows monitor refresh rate, Mac display refresh rate and network throughput limit usable
+FPS. In particular, sending 120 FPS to a 60 Hz display cannot show 120 distinct frames.
+Unsupported encoder FPS fall back to 60/30 before reducing resolution. The connection
+status reports effective dimensions, effective encoder FPS, target bitrate and processing path.
+
+**Performans bilgilerini göster** displays measured decode/presentation-submission rates,
+bitrate, decode CPU duration and application ping/pong RTT. **Performans ölçümlerini kaydet…**
+saves up to 300 one-second samples as CSV using a native save dialog. Samples stay in memory;
+a new connection/profile resets them. No keys, clipboard, images, addresses or pairing secrets
+are logged. “submitted_fps” counts display-layer submissions, not physical monitor scanout.
+Host capture/encode/send durations measure CPU wall time, not GPU completion. RTT includes
+application scheduling and video TCP backpressure; it is not input-to-photon latency.
+
+For a repeatable test, start with 1080p60/20 Mbps, wait 10 seconds after connecting, then
+scroll text, drag a window and play a moving test pattern for 60 seconds. Export the CSV,
+repeat at 1440p60/40 Mbps and native 60/120, and record Windows GPU/driver, both displays'
+refresh rates, network type, effective encoder path and resolution. A high-speed external
+camera measuring a physical input and resulting display change is required for true
+input-to-visible-response latency. Results on the user's physical PC are not yet measured.
+
 ## Implementation
 
 - Existing pairing and input protocol v1 remain unchanged. The desktop protocol has its own
@@ -40,19 +75,29 @@ is required because the captured screen is on Windows.
 - mDNS and stored hostname/IP are address hints. A saved identity is matched during rediscovery;
   the PSK and authenticated Hello must verify before a new address/identity is persisted.
   On migration, the first authenticated desktop session learns the identity.
-- Desktop Duplication captures the primary output in its logical orientation and composites
-  color/masked/monochrome cursor shapes. BGRA is converted to NV12 for Media Foundation.
-  The encoder tries hardware, then software. Runtime hardware encoder failures fall back to
-  software. Unsupported sizes are reduced proportionally; effective resolution is shown in
-  the window title. The target is source resolution at 30 FPS (maximum encoder dimensions
-  4096); load reduces frame rate before resolution.
+- Desktop Duplication keeps an owned D3D11 copy before releasing the captured frame.
+  A compute shader rotates, scales and composites color/masked/monochrome cursor shapes.
+  The D3D11 video processor converts to limited-range BT.709 NV12 on the GPU. A shared
+  DXGI device manager supplies those surfaces directly to a D3D11-aware Media Foundation
+  hardware encoder, without reading desktop pixels back to system memory.
+- Encoder-owned samples use a bounded 2–4-surface allocator. Captures are skipped when
+  surfaces/input credits are unavailable; in-flight textures are not overwritten. Async MFT
+  events are polled without the former 100 ms waits. Monotonic timestamps describe actual
+  submission time. Capture pacing skips missed deadlines and recovers target FPS after load.
+- The fallback order is GPU surfaces, hardware encoding with CPU conversion, then software.
+  A runtime GPU failure retries with CPU conversion; hardware encoder failure retries software.
+  The compatibility path preserves cursor/rotation handling and uses row copies for unrotated
+  displays. Software conversion uses BT.601 with matching metadata. H.264 remains the codec;
+  HEVC/AV1, 4:4:4 and a datagram video transport are not implemented in this version.
 - H.264 access units are chunked into at most 60 KiB payloads and assembled with a 16 MiB
   frame bound. The receiver requires contiguous chunks and a five-second transfer deadline.
   Encoded reference frames are decoded in order; only already decoded images are replaced
   in the latest-frame slot. There is no unbounded video queue.
 - VideoToolbox produces retained immutable pixel buffers off the main thread. AppKit presents
-  samples immediately through AVSampleBufferDisplayLayer. All windows, focus, Spaces and
-  cursor visibility changes stay on the main thread.
+  samples immediately through AVSampleBufferDisplayLayer. On macOS 14+, NSView's display link
+  follows the current display with a preferred rate up to 120 Hz. Older systems use a 120 Hz
+  timer in common run-loop modes, including during dragging/menu tracking. All windows,
+  focus, Spaces and cursor visibility changes stay on the main thread.
 - Each input event checks focus; a timer is not the only gate. Pointer coordinates account
   for letterboxing and the Windows primary display's position inside the virtual desktop.
   Mouse-up outside the image still releases its Windows button. Menu bar/Dock overlays retain
@@ -87,7 +132,10 @@ clipboard echo/reconnect behavior, pointer mapping, and real VideoToolbox decodi
 small generated H.264 test-pattern fixture. A main-thread native viewer smoke check also
 validates full-screen window configuration and the Objective-C display-layer calls without
 showing a window or requesting input permissions. Windows-native tests also exercise the software
-Media Foundation encoder without requiring screen capture. Native macOS and Windows CI jobs
+Media Foundation encoder without requiring screen capture. WARP compute tests compile and
+execute the production cursor/rotation shader for four orientations and color, masked and
+monochrome cursor operations without requiring a physical GPU. Settings bounds, deadline
+recovery, telemetry wire records and bounded CSV reporting also have automated tests. Native macOS and Windows CI jobs
 run tests before packaging `.dmg` and `.msi` artifacts.
 
 Manual acceptance on a real Mac/Windows pair is still required:
@@ -106,7 +154,7 @@ Manual acceptance on a real Mac/Windows pair is still required:
 | Older receiver | Clear update message; input-only mode remains usable |
 
 Performance acceptance targets on a healthy LAN: reconnect within 10 seconds of the PC
-becoming reachable; at 1080p/30 FPS, input-to-visible-response at or below 150 ms. These are
+becoming reachable; at 1080p/60 FPS, input-to-visible-response at or below 150 ms. These are
 measurement targets, not verified guarantees. Record hardware, effective resolution, encoder,
 network conditions and observed latency during physical-device validation. Headless/virtual
 monitors, WAN connectivity, audio, files and monitor selection are outside this version.

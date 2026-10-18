@@ -169,6 +169,14 @@ define_class!(
             crate::desktop::toggle_clipboard();
             if let Some(item) = sender { unsafe { let _: () = msg_send![item, setState: if crate::desktop::shared().clipboard.load(Ordering::SeqCst) { 1isize } else { 0isize }]; } }
         }
+        #[unsafe(method(selectStreamProfile:))]
+        fn select_stream_profile(&self, sender: Option<&NSMenuItem>) {
+            if let Some(item) = sender { crate::desktop::set_profile(item.tag() as usize); }
+        }
+        #[unsafe(method(toggleStreamStats:))]
+        fn toggle_stream_stats(&self, _sender: Option<&AnyObject>) { crate::desktop::toggle_stats(); }
+        #[unsafe(method(exportStreamStats:))]
+        fn export_stream_stats(&self, _sender: Option<&AnyObject>) { crate::desktop::export_metrics(self.mtm()); }
         #[unsafe(method(toggleConnection:))]
         fn toggle_connection(&self, sender: Option<&AnyObject>) {
             crate::desktop::toggle_connection();
@@ -259,6 +267,16 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
             cfg.clipboard_enabled,
         ),
         ("Bağlantıyı duraklat", sel!(toggleConnection:), false),
+        (
+            "Performans bilgilerini göster",
+            sel!(toggleStreamStats:),
+            cfg.show_stream_stats,
+        ),
+        (
+            "Performans ölçümlerini kaydet…",
+            sel!(exportStreamStats:),
+            false,
+        ),
     ] {
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -274,6 +292,30 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
         }
         menu.addItem(&item);
     }
+    let profile_item = NSMenuItem::new(mtm);
+    profile_item.setTitle(ns_string!("Görüntü kalitesi"));
+    let profiles = NSMenu::new(mtm);
+    for (index, (title, settings)) in protocol::stream::StreamSettings::PROFILES
+        .iter()
+        .enumerate()
+    {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(sel!(selectStreamProfile:)),
+                ns_string!(""),
+            )
+        };
+        unsafe {
+            item.setTarget(Some(&delegate));
+            item.setTag(index as isize);
+            let _: () = msg_send![&*item, setState: if *settings == cfg.stream.normalized() { 1isize } else { 0isize }];
+        }
+        profiles.addItem(&item);
+    }
+    profile_item.setSubmenu(Some(&profiles));
+    menu.addItem(&profile_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     let permissions_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -375,11 +417,31 @@ pub fn install_status_updater(
                     crate::desktop::shared().paused.load(Ordering::SeqCst),
                 ),
                 ("Start at Login", crate::autostart::is_enabled()),
+                (
+                    "Performans bilgilerini göster",
+                    crate::desktop::shared()
+                        .stats_visible
+                        .load(Ordering::SeqCst),
+                ),
             ] {
                 if let Some(item) = menu.itemWithTitle(&NSString::from_str(title)) {
                     unsafe {
                         let _: () =
                             msg_send![&*item, setState: if enabled { 1isize } else { 0isize }];
+                    }
+                }
+            }
+        }
+        if let Some(profiles) = status_item
+            .menu(mtm)
+            .and_then(|menu| menu.itemWithTitle(ns_string!("Görüntü kalitesi")))
+            .and_then(|item| item.submenu())
+        {
+            let selected = *crate::desktop::shared().settings.lock().unwrap();
+            for (title, settings) in protocol::stream::StreamSettings::PROFILES {
+                if let Some(item) = profiles.itemWithTitle(&NSString::from_str(title)) {
+                    unsafe {
+                        let _: () = msg_send![&*item, setState: if settings == selected { 1isize } else { 0isize }];
                     }
                 }
             }

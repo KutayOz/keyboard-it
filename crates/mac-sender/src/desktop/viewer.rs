@@ -9,14 +9,14 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSCursor, NSEvent,
-    NSPasteboard, NSPasteboardTypeString, NSTextField, NSView, NSWindow,
+    NSPasteboard, NSPasteboardTypeString, NSSavePanel, NSTextField, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString, NSTimer,
+    NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
-use objc2_quartz_core::CALayer;
+use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CALayer};
 use protocol::{
     desktop::{ClipboardSync, Message},
     InputEvent, KeyEvent, MsgType,
@@ -39,6 +39,8 @@ struct Ivars {
     last_connection: Cell<u64>,
     last_clipboard: Cell<bool>,
     cursor_hidden: Cell<bool>,
+    display_link: RefCell<Option<Retained<CADisplayLink>>>,
+    stats_label: Retained<NSTextField>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -59,6 +61,10 @@ define_class!(
     impl Viewer {
         #[unsafe(method(tick:))]
         fn tick(&self,_timer:&NSTimer) { self.update(); }
+        #[unsafe(method(displayTick:))]
+        fn display_tick(&self, _link: &CADisplayLink) { self.present_frame(); }
+        #[unsafe(method(fallbackTick:))]
+        fn fallback_tick(&self, _timer: &NSTimer) { self.present_frame(); }
     }
 );
 impl Viewer {
@@ -98,6 +104,14 @@ impl Viewer {
         label.setTextColor(Some(&NSColor::whiteColor()));
         label.setFrame(NSRect::new(NSPoint::new(20., 20.), NSSize::new(1100., 22.)));
         view.addSubview(&label);
+        let stats_label = NSTextField::labelWithString(ns_string!(""), mtm);
+        stats_label.setTextColor(Some(&NSColor::whiteColor()));
+        stats_label.setBackgroundColor(Some(&NSColor::blackColor()));
+        stats_label.setDrawsBackground(true);
+        stats_label.setMaximumNumberOfLines(3);
+        stats_label.setFrame(NSRect::new(NSPoint::new(20., 48.), NSSize::new(1220., 44.)));
+        stats_label.setHidden(true);
+        view.addSubview(&stats_label);
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window: window.clone(),
             view,
@@ -109,17 +123,50 @@ impl Viewer {
             last_connection: Cell::new(0),
             last_clipboard: Cell::new(true),
             cursor_hidden: Cell::new(false),
+            display_link: RefCell::new(None),
+            stats_label,
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         window.setDelegate(Some(ProtocolObject::from_ref(&*this)));
         unsafe {
-            let _ = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                1. / 30.,
+            // NSView display links follow the window's current display (including
+            // ProMotion). Keep the older macOS deployment target with a timer fallback.
+            if this
+                .ivars()
+                .view
+                .respondsToSelector(sel!(displayLinkWithTarget:selector:))
+            {
+                let link = this
+                    .ivars()
+                    .view
+                    .displayLinkWithTarget_selector(&this, sel!(displayTick:));
+                link.setPreferredFrameRateRange(CAFrameRateRange {
+                    minimum: 30.,
+                    maximum: 120.,
+                    preferred: 120.,
+                });
+                link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
+                *this.ivars().display_link.borrow_mut() = Some(link);
+            }
+            if this.ivars().display_link.borrow().is_none() {
+                let timer =
+                    NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                        1. / 120.,
+                        &this,
+                        sel!(fallbackTick:),
+                        None,
+                        true,
+                    );
+                NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+            }
+            let timer = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                0.1,
                 &this,
                 sel!(tick:),
                 None,
                 true,
             );
+            NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
         }
         this
     }
@@ -173,6 +220,37 @@ impl Viewer {
         // Retain the last rendered image for Mission Control's Space thumbnail;
         // ready=false still prevents input until a fresh frame arrives on return.
     }
+    fn present_frame(&self) {
+        let s = shared();
+        if !self.focused() || !s.visible.load(Ordering::SeqCst) {
+            return;
+        }
+        let iv = self.ivars();
+        if let Some(frame) = s.frame.lock().unwrap().take() {
+            match frame.sample() {
+                Ok(sample) => unsafe {
+                    let ready: bool = msg_send![&*iv.layer, isReadyForMoreMediaData];
+                    if !ready {
+                        let _: () = msg_send![&*iv.layer, flush];
+                    }
+                    let _: () = msg_send![&*iv.layer,enqueueSampleBuffer:sample.0];
+                    s.metrics
+                        .lock()
+                        .unwrap()
+                        .presented(frame.1.elapsed().as_micros() as u64);
+                    iv.last_frame.set(Some(Instant::now()));
+                    let mut snap = s.snapshot.lock().unwrap();
+                    if snap.connected {
+                        snap.ready = true;
+                    }
+                },
+                Err(e) => {
+                    s.snapshot.lock().unwrap().status = e;
+                    s.snapshot.lock().unwrap().ready = false;
+                }
+            }
+        }
+    }
     fn update(&self) {
         let s = shared();
         let iv = self.ivars();
@@ -202,27 +280,27 @@ impl Viewer {
             iv.last_frame.set(None);
         }
         iv.layer.setFrame(iv.view.bounds());
+        iv.stats_label.setFrame(NSRect::new(
+            NSPoint::new(20., 48.),
+            NSSize::new((iv.view.bounds().size.width - 40.).max(100.), 62.),
+        ));
+        let d = s.snapshot.lock().unwrap().display.clone();
+        let settings = *s.settings.lock().unwrap();
+        if let Some(d) = d {
+            s.metrics
+                .lock()
+                .unwrap()
+                .tick(d.width, d.height, settings.fps, active);
+        }
+        iv.stats_label
+            .setHidden(!active || !s.stats_visible.load(Ordering::SeqCst));
+        if s.stats_visible.load(Ordering::SeqCst) {
+            let status = s.snapshot.lock().unwrap().status.clone();
+            let summary = s.metrics.lock().unwrap().summary.clone();
+            iv.stats_label
+                .setStringValue(&NSString::from_str(&format!("{status}\n{summary}")));
+        }
         if active {
-            if let Some(frame) = s.frame.lock().unwrap().take() {
-                match frame.sample() {
-                    Ok(sample) => unsafe {
-                        let ready: bool = msg_send![&*iv.layer, isReadyForMoreMediaData];
-                        if !ready {
-                            let _: () = msg_send![&*iv.layer, flush];
-                        }
-                        let _: () = msg_send![&*iv.layer,enqueueSampleBuffer:sample.0];
-                        iv.last_frame.set(Some(Instant::now()));
-                        let mut snap = s.snapshot.lock().unwrap();
-                        if snap.connected {
-                            snap.ready = true;
-                        }
-                    },
-                    Err(e) => {
-                        s.snapshot.lock().unwrap().status = e;
-                        s.snapshot.lock().unwrap().ready = false;
-                    }
-                }
-            }
             // A live TCP connection is not enough: never type into a frozen picture.
             if iv
                 .last_frame
@@ -303,6 +381,19 @@ pub fn open(mtm: MainThreadMarker) {
     w.makeKeyAndOrderFront(None);
     if !w.styleMask().contains(NSWindowStyleMask::FullScreen) {
         w.toggleFullScreen(None);
+    }
+}
+pub fn export_metrics(mtm: MainThreadMarker) {
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setNameFieldStringValue(ns_string!("keyboard-it-performance.csv"));
+    panel.setTitle(Some(ns_string!("Performans ölçümlerini kaydet")));
+    if panel.runModal() == 1 {
+        if let Some(path) = panel.URL().and_then(|url| url.path()) {
+            if let Err(e) = std::fs::write(path.to_string(), shared().metrics.lock().unwrap().csv())
+            {
+                crate::menubar::show_alert(mtm, "Ölçümler kaydedilemedi", &e.to_string());
+            }
+        }
     }
 }
 fn read_clipboard() -> Option<String> {

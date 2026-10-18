@@ -24,6 +24,10 @@ pub enum Role {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub stream: crate::stream::StreamSettings,
+    #[serde(default)]
+    pub show_stream_stats: bool,
+    #[serde(default)]
     pub device_id: String,
     #[serde(default)]
     pub peer_device_id: String,
@@ -65,6 +69,8 @@ fn default_port() -> u16 {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            stream: Default::default(),
+            show_stream_stats: false,
             device_id: String::new(),
             peer_device_id: String::new(),
             desktop_port: default_desktop_port(),
@@ -265,6 +271,8 @@ mod tests {
         .unwrap();
         assert_eq!(c.peer_ip, "");
         assert!(c.desktop_mode && c.clipboard_enabled);
+        assert_eq!(c.stream, crate::stream::StreamSettings::default());
+        assert!(!c.show_stream_stats);
         assert_eq!(c.desktop_port, 5601);
         assert!(c.peer_device_id.is_empty());
         assert_eq!(c.peer_host, "h");

@@ -31,7 +31,7 @@ if [ ! -f "$ICNS" ]; then
   python3 "$ROOT/packaging/mac/make_icon.py"
 fi
 
-echo "==> building release (opt-level=z, lto) — this can take a while"
+echo "==> building release (opt-level=3, lto) — this can take a while"
 cargo build --release -p mac-sender
 
 echo "==> assembling $APP_NAME.app skeleton"
