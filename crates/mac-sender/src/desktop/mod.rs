@@ -1,5 +1,6 @@
 //! Persistent LAN connection and main-thread native viewer. Network workers never
 //! activate AppKit windows, so reconnecting cannot steal focus or create Spaces.
+mod metrics;
 mod video;
 mod viewer;
 use protocol::{
@@ -18,7 +19,7 @@ use std::{
 };
 #[cfg(debug_assertions)]
 pub use viewer::check_viewer;
-pub use viewer::{handle_event, open, release_ui};
+pub use viewer::{export_metrics, handle_event, open, release_ui};
 
 #[derive(Default)]
 pub struct Snapshot {
@@ -32,6 +33,9 @@ pub struct Snapshot {
 pub struct Shared {
     pub snapshot: Mutex<Snapshot>,
     pub frame: Mutex<Option<video::Frame>>,
+    pub metrics: Mutex<metrics::Metrics>,
+    pub stats_visible: AtomicBool,
+    pub settings: Mutex<protocol::stream::StreamSettings>,
     outgoing: Mutex<Option<mpsc::SyncSender<Message>>>,
     bulk: Mutex<Option<mpsc::SyncSender<Message>>>,
     socket: Mutex<Option<TcpStream>>,
@@ -50,6 +54,15 @@ pub fn shared() -> &'static Arc<Shared> {
                 ..Default::default()
             }),
             frame: Mutex::new(None),
+            metrics: Mutex::new(Default::default()),
+            settings: Mutex::new(Default::default()),
+            stats_visible: AtomicBool::new(
+                Config::load()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .show_stream_stats,
+            ),
             outgoing: Mutex::new(None),
             bulk: Mutex::new(None),
             socket: Mutex::new(None),
@@ -116,6 +129,22 @@ pub fn toggle_clipboard() {
         visible: s.visible.load(Ordering::SeqCst),
         clipboard: enabled,
     });
+}
+pub fn set_profile(index: usize) {
+    if let Some((_, settings)) = protocol::stream::StreamSettings::PROFILES.get(index) {
+        let _ = Config::update(|c| c.stream = *settings);
+        *shared().settings.lock().unwrap() = *settings;
+        shared().snapshot.lock().unwrap().ready = false;
+        send(Message::ReleaseAll);
+        disconnect();
+        shared().frame.lock().unwrap().take();
+        shared().metrics.lock().unwrap().reset();
+    }
+}
+pub fn toggle_stats() {
+    let enabled = !shared().stats_visible.load(Ordering::SeqCst);
+    shared().stats_visible.store(enabled, Ordering::SeqCst);
+    let _ = Config::update(|c| c.show_stream_stats = enabled);
 }
 pub fn toggle_connection() {
     let s = shared();
@@ -234,6 +263,9 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
         snap.ready = false;
         snap.status = "Bağlandı — Windows’u Aç".into();
     }
+    shared().metrics.lock().unwrap().reset();
+    let settings = cfg.stream.normalized();
+    *shared().settings.lock().unwrap() = settings;
     let running = Arc::new(AtomicBool::new(true));
     let alive = running.clone();
     let secret = cfg.shared_secret.clone();
@@ -241,9 +273,12 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
     let writer_thread = thread::spawn(move || {
         let mut beat = Instant::now() - Duration::from_secs(2);
         let visible = shared().visible.load(Ordering::SeqCst);
-        let mut result = writer.send(&Message::Active {
-            visible,
-            clipboard: shared().clipboard.load(Ordering::SeqCst),
+        let mut ping_id = 0u64;
+        let mut result = writer.send(&Message::Configure(settings)).and_then(|_| {
+            writer.send(&Message::Active {
+                visible,
+                clipboard: shared().clipboard.load(Ordering::SeqCst),
+            })
         });
         while result.is_ok() && alive.load(Ordering::SeqCst) {
             if shared().paused.load(Ordering::SeqCst)
@@ -256,7 +291,9 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
                 if current.shared_secret != secret || current.peer_host != host {
                     break;
                 }
-                result = writer.send(&Message::Heartbeat);
+                ping_id = ping_id.wrapping_add(1);
+                shared().metrics.lock().unwrap().ping(ping_id);
+                result = writer.send(&Message::Ping(ping_id));
                 beat = Instant::now();
                 if result.is_err() {
                     break;
@@ -285,7 +322,10 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
             let msg = reader.recv()?;
             match msg {
                 Message::Heartbeat => {}
+                Message::Pong(id) => shared().metrics.lock().unwrap().pong(id),
+                Message::Stats(stats) => shared().metrics.lock().unwrap().host(stats),
                 Message::Display(d) => {
+                    shared().frame.lock().unwrap().take();
                     decoder = video::Decoder::default();
                     video_assembly.clear();
                     let mut snap = shared().snapshot.lock().unwrap();
@@ -309,9 +349,16 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
                         video_assembly.push(id, total, offset, &data, desktop::MAX_VIDEO)?
                     {
                         if shared().visible.load(Ordering::SeqCst) {
+                            let started = Instant::now();
                             let frame = decoder.decode(&data).map_err(io::Error::other)?;
                             if let Some(frame) = frame {
-                                *shared().frame.lock().unwrap() = Some(frame);
+                                let replaced =
+                                    shared().frame.lock().unwrap().replace(frame).is_some();
+                                shared()
+                                    .metrics
+                                    .lock()
+                                    .unwrap()
+                                    .decoded(started.elapsed().as_micros() as u64, replaced);
                             }
                         }
                     }

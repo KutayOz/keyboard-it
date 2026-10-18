@@ -1,6 +1,6 @@
 //! Small CoreMedia/VideoToolbox bridge. The decoder stays on the network worker;
 //! immutable retained CVPixelBuffers cross to AppKit through a latest-frame slot.
-use std::{ffi::c_void, ptr};
+use std::{ffi::c_void, ptr, time::Instant};
 type Ref = *mut c_void;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -11,10 +11,10 @@ pub struct Time {
     epoch: i64,
 }
 impl Time {
-    fn frame(n: i64) -> Self {
+    fn micros(n: i64) -> Self {
         Self {
             value: n,
-            scale: 30,
+            scale: 1_000_000,
             flags: 1,
             epoch: 0,
         }
@@ -108,11 +108,13 @@ unsafe extern "C" {
         info: *mut u32,
     ) -> i32;
     fn VTDecompressionSessionInvalidate(session: Ref);
+    fn VTSessionSetProperty(session: Ref, key: Ref, value: Ref) -> i32;
+    static kVTDecompressionPropertyKey_RealTime: Ref;
 }
 #[link(name = "AVFoundation", kind = "framework")]
 unsafe extern "C" {}
 
-pub struct Frame(Ref);
+pub struct Frame(Ref, pub Instant);
 // A retained immutable CVPixelBuffer is safe to hand to the main-thread display.
 unsafe impl Send for Frame {}
 impl Drop for Frame {
@@ -132,8 +134,8 @@ impl Frame {
                 &mut format,
             ))?;
             let timing = Timing {
-                duration: Time::frame(1),
-                presentation: Time::frame(0),
+                duration: Time::default(),
+                presentation: Time::micros(0),
                 decode: Time::default(),
             };
             let mut sample = ptr::null_mut();
@@ -192,7 +194,7 @@ pub struct Decoder {
     format: Ref,
     sps: Vec<u8>,
     pps: Vec<u8>,
-    frame: i64,
+    clock: Instant,
     output: Box<Option<Frame>>,
 }
 impl Default for Decoder {
@@ -202,7 +204,7 @@ impl Default for Decoder {
             format: ptr::null_mut(),
             sps: vec![],
             pps: vec![],
-            frame: 0,
+            clock: Instant::now(),
             output: Box::new(None),
         }
     }
@@ -217,7 +219,7 @@ unsafe extern "C" fn decoded(
     _duration: Time,
 ) {
     if status == 0 && !image.is_null() {
-        *(context as *mut Option<Frame>) = Some(Frame(CFRetain(image)));
+        *(context as *mut Option<Frame>) = Some(Frame(CFRetain(image), Instant::now()));
     }
 }
 impl Decoder {
@@ -267,6 +269,11 @@ impl Decoder {
                     &cb,
                     &mut self.session,
                 ))?;
+                let _ = VTSessionSetProperty(
+                    self.session,
+                    kVTDecompressionPropertyKey_RealTime,
+                    kCFBooleanTrue,
+                );
             }
             let mut avcc = Vec::with_capacity(data.len());
             for n in units {
@@ -296,11 +303,12 @@ impl Decoder {
                 return Err(format!("CoreMedia copy: {copy}"));
             }
             let timing = Timing {
-                duration: Time::frame(1),
-                presentation: Time::frame(self.frame),
+                duration: Time::default(),
+                presentation: Time::micros(
+                    self.clock.elapsed().as_micros().min(i64::MAX as u128) as i64
+                ),
                 decode: Time::default(),
             };
-            self.frame += 1;
             let size = avcc.len();
             let mut sample = ptr::null_mut();
             let status = CMSampleBufferCreateReady(

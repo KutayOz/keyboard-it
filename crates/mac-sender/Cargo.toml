@@ -14,7 +14,7 @@ core-graphics = "0.25"
 core-foundation = "0.10"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CADisplayLink", "CAFrameRateRange"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSNotification", "NSThread", "NSTimer", "NSDate"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
@@ -27,5 +27,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenu",
     "NSMenuItem",
     "NSView",
+    "NSSavePanel",
+    "objc2-quartz-core",
     "objc2-core-foundation",
 ] }

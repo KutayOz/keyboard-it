@@ -9,13 +9,13 @@ members = [
 # Single source of version truth: all three crates inherit it (version.workspace = true),
 # so the dmg (mac) and msi (win) versions can never drift apart.
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 
 # Small single-file release exe for distribution (goes into the .msi).
 # Note: opt-level/lto affect the whole workspace (mac-sender included). panic="abort"
 # is deliberately NOT set: unwind behavior differs across platforms.
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = true

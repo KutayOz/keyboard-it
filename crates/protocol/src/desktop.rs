@@ -5,7 +5,7 @@ use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 pub const DEFAULT_PORT: u16 = 5601;
 pub const CHUNK: usize = 60 * 1024;
 pub const MAX_VIDEO: usize = 16 * 1024 * 1024;
@@ -73,6 +73,21 @@ pub enum Message {
     },
     Heartbeat,
     Status(String),
+    Configure(crate::stream::StreamSettings),
+    /// Rates over the last reporting window, and host CPU wall times. These are
+    /// not GPU completion timings or end-to-end input latency measurements.
+    Stats(StreamStats),
+    Ping(u64),
+    Pong(u64),
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamStats {
+    pub fps_milli: u32,
+    pub bitrate_kbps: u32,
+    pub capture_us: u32,
+    pub encode_us: u32,
+    pub send_us: u32,
+    pub skipped: u32,
 }
 impl Message {
     pub fn encode(&self) -> io::Result<Vec<u8>> {
@@ -137,6 +152,33 @@ impl Message {
             Self::Status(s) => {
                 b.push(9);
                 b.extend(s.as_bytes());
+            }
+            Self::Configure(s) => {
+                b.push(10);
+                for n in [s.fps, s.max_width, s.max_height, s.bitrate_kbps] {
+                    b.extend(n.to_be_bytes());
+                }
+            }
+            Self::Stats(s) => {
+                b.push(11);
+                for n in [
+                    s.fps_milli,
+                    s.bitrate_kbps,
+                    s.capture_us,
+                    s.encode_us,
+                    s.send_us,
+                    s.skipped,
+                ] {
+                    b.extend(n.to_be_bytes());
+                }
+            }
+            Self::Ping(id) | Self::Pong(id) => {
+                b.push(if matches!(self, Self::Ping(_)) {
+                    12
+                } else {
+                    13
+                });
+                b.extend(id.to_be_bytes());
             }
         }
         // Reuse decode validation for locally produced records too.
@@ -215,6 +257,28 @@ impl Message {
                     .map_err(|_| invalid("status UTF-8"))?
                     .into(),
             ),
+            10 if p.len() == 16 => {
+                let s = crate::stream::StreamSettings {
+                    fps: u32_at(0),
+                    max_width: u32_at(4),
+                    max_height: u32_at(8),
+                    bitrate_kbps: u32_at(12),
+                };
+                if !s.valid() {
+                    return Err(invalid("invalid stream settings"));
+                }
+                Self::Configure(s)
+            }
+            11 if p.len() == 24 => Self::Stats(StreamStats {
+                fps_milli: u32_at(0),
+                bitrate_kbps: u32_at(4),
+                capture_us: u32_at(8),
+                encode_us: u32_at(12),
+                send_us: u32_at(16),
+                skipped: u32_at(20),
+            }),
+            12 if p.len() == 8 => Self::Ping(u64_at(0)),
+            13 if p.len() == 8 => Self::Pong(u64_at(0)),
             _ => return Err(invalid("invalid desktop message")),
         })
     }
@@ -623,6 +687,17 @@ mod resilience_tests {
         assert!(h264_keyframe(&[0, 0, 1, 0x65, 1]));
         assert!(!h264_keyframe(&[0, 0, 1, 0x41, 1]));
         let messages = [
+            Message::Configure(crate::stream::StreamSettings::PROFILES[2].1),
+            Message::Stats(StreamStats {
+                fps_milli: 59800,
+                bitrate_kbps: 19400,
+                capture_us: 800,
+                encode_us: 1500,
+                send_us: 400,
+                skipped: 1,
+            }),
+            Message::Ping(100),
+            Message::Pong(100),
             Message::Display(Display {
                 width: 1920,
                 height: 1080,
@@ -646,6 +721,15 @@ mod resilience_tests {
         ];
         for m in messages {
             assert_eq!(Message::decode(&m.encode().unwrap()).unwrap(), m);
+        }
+        assert!(Message::Configure(crate::stream::StreamSettings {
+            fps: u32::MAX,
+            ..Default::default()
+        })
+        .encode()
+        .is_err());
+        for tag in [10, 11, 12, 13] {
+            assert!(Message::decode(&[tag, 0]).is_err());
         }
     }
 }

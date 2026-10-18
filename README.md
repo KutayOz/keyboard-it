@@ -266,3 +266,7 @@ an old session only after authentication. Video and clipboard reassembly are bou
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### 0.5.0 görüntü motoru
+
+GPU üzerinde imleç/döndürme/ölçekleme ve NV12 dönüşümü, D3D11 yüzeylerinden donanım kodlama, 60/120 FPS profilleri ve Mac ekranına bağlı görüntü yenilemesi eklendi. Menüdeki **Görüntü kalitesi** ve **Performans bilgilerini göster** seçeneklerini kullanın. Masaüstü için her iki cihazın da 0.5.0 olması gerekir; eşleştirme korunur. Ayrıntılar ve ölçüm sınırları: [Remote desktop](docs/remote-desktop.md).
