@@ -55,7 +55,14 @@ pub fn shared() -> &'static Arc<Shared> {
             }),
             frame: Mutex::new(None),
             metrics: Mutex::new(Default::default()),
-            settings: Mutex::new(Default::default()),
+            settings: Mutex::new(
+                Config::load()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .stream
+                    .normalized(),
+            ),
             stats_visible: AtomicBool::new(
                 Config::load()
                     .ok()
@@ -236,7 +243,11 @@ fn connect(cfg: &Config) -> io::Result<(Channel, String, String, u16)> {
         for addr in addresses {
             match TcpStream::connect_timeout(&addr, Duration::from_millis(750)).and_then(|stream| {
                 *shared().socket.lock().unwrap() = Some(stream.try_clone()?);
-                Channel::connect(stream, &key, &cfg.device_id, true)
+                Channel::connect(stream, &key, &cfg.device_id, true).map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof || e.to_string().contains("version mismatch") {
+                        io::Error::other(format!("Windows uygulamasının da 0.5.0 olduğundan emin olun; eski sürümde yalnız klavye/fare modunu kullanın ({e})"))
+                    } else { e }
+                })
             }) {
                 Ok((channel, id)) => return Ok((channel, id, addr.ip().to_string(), port)),
                 Err(e) => last = e,

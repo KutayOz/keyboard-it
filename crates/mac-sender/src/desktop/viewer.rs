@@ -63,6 +63,8 @@ define_class!(
         fn tick(&self,_timer:&NSTimer) { self.update(); }
         #[unsafe(method(displayTick:))]
         fn display_tick(&self, _link: &CADisplayLink) { self.present_frame(); }
+        #[unsafe(method(fallbackTick:))]
+        fn fallback_tick(&self, _timer: &NSTimer) { self.present_frame(); }
     }
 );
 impl Viewer {
@@ -146,13 +148,19 @@ impl Viewer {
                 link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
                 *this.ivars().display_link.borrow_mut() = Some(link);
             }
-            let interval = if this.ivars().display_link.borrow().is_some() {
-                0.1
-            } else {
-                1. / 120.
-            };
+            if this.ivars().display_link.borrow().is_none() {
+                let timer =
+                    NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                        1. / 120.,
+                        &this,
+                        sel!(fallbackTick:),
+                        None,
+                        true,
+                    );
+                NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+            }
             let timer = NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                interval,
+                0.1,
                 &this,
                 sel!(tick:),
                 None,
@@ -293,9 +301,6 @@ impl Viewer {
                 .setStringValue(&NSString::from_str(&format!("{status}\n{summary}")));
         }
         if active {
-            if iv.display_link.borrow().is_none() {
-                self.present_frame();
-            }
             // A live TCP connection is not enough: never type into a frozen picture.
             if iv
                 .last_frame

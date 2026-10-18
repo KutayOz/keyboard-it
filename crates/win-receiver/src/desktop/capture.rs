@@ -114,7 +114,7 @@ impl Capture {
     }
     /// Keep an owned GPU copy before releasing the DXGI frame. The encoder must
     /// never retain the desktop-duplication resource after ReleaseFrame.
-    fn acquire(&mut self) -> Result<()> {
+    fn acquire(&mut self) -> Result<bool> {
         unsafe {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
@@ -122,11 +122,11 @@ impl Capture {
                 .duplication
                 .AcquireNextFrame(0, &mut info, &mut resource)
             {
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(()),
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
                 Err(e) => return Err(e),
                 Ok(()) => {}
             }
-            let result = (|| -> Result<()> {
+            let result = (|| -> Result<bool> {
                 if info.LastMouseUpdateTime != 0 {
                     self.pointer_x = info.PointerPosition.Position.x;
                     self.pointer_y = info.PointerPosition.Position.y;
@@ -144,7 +144,19 @@ impl Capture {
                     )?;
                     self.pointer.truncate(size as usize);
                 }
-                let texture: ID3D11Texture2D = resource.as_ref().unwrap().cast()?;
+                // Mouse-only updates do not require another desktop texture copy.
+                if info.LastPresentTime == 0 && self.surface.is_some() {
+                    return Ok(false);
+                }
+                let texture: ID3D11Texture2D = resource
+                    .as_ref()
+                    .ok_or_else(|| {
+                        windows::core::Error::new(
+                            DXGI_ERROR_ACCESS_LOST,
+                            "Desktop texture unavailable",
+                        )
+                    })?
+                    .cast()?;
                 if self.surface.is_none() {
                     let mut desc = D3D11_TEXTURE2D_DESC::default();
                     texture.GetDesc(&mut desc);
@@ -157,12 +169,12 @@ impl Capture {
                 }
                 self.context
                     .CopyResource(self.surface.as_ref().unwrap(), &texture);
-                Ok(())
+                Ok(true)
             })();
             let released = self.duplication.ReleaseFrame();
-            result?;
+            let changed = result?;
             released?;
-            Ok(())
+            Ok(changed)
         }
     }
     pub fn gpu_frame(&mut self) -> Result<Option<super::gpu::Frame<'_>>> {
@@ -181,7 +193,10 @@ impl Capture {
     }
     /// Compatibility fallback: oriented BGRA with the cursor composited.
     pub fn frame(&mut self) -> Result<Option<Vec<u8>>> {
-        self.acquire()?;
+        let changed = self.acquire()?;
+        if !changed && !self.last.is_empty() {
+            return Ok(Some(self.with_cursor()));
+        }
         let Some(texture) = &self.surface else {
             return Ok(None);
         };
