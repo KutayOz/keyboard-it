@@ -96,6 +96,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     let settings = SettingsWindow::new().map_err(io_err)?;
     let pair_win = PairRequestWindow::new().map_err(io_err)?;
 
+    pair_win.set_offer_startup(!cfg.startup_configured);
     settings.set_listen_port(cfg.port.to_string().into());
     settings.set_autostart(autostart::is_enabled());
     settings.set_active(false);
@@ -107,7 +108,10 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     let ip_text = if ips.is_empty() {
         "no LAN IPv4 found".to_string()
     } else {
-        ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ")
+        ips.iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     settings.set_this_pc(format!("This PC: {} — {}", crate::netinfo::hostname(), ip_text).into());
 
@@ -125,21 +129,48 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let pw = pair_win.as_weak();
         let sw = settings.as_weak();
         let slot = answer.clone();
+        let cfg_setup = cfg_cell.clone();
         pair_win.on_allow(move || {
             // The claim follows the delivery. Saying "approved" when the answer
             // went nowhere is how the user came away believing a pairing had
             // worked while the Mac had already been told no.
             let delivered = reply(&slot, true, "Allow clicked");
+            if delivered && !cfg_setup.borrow().startup_configured {
+                let enabled = pw.upgrade().is_some_and(|w| w.get_start_at_login());
+                cfg_setup.borrow_mut().startup_configured = true;
+                let _ = cfg_setup.borrow().save();
+                if let Some(w) = pw.upgrade() {
+                    w.set_offer_startup(false);
+                }
+                let status_window = sw.clone();
+                std::thread::spawn(move || {
+                    let result = autostart::set_enabled(enabled);
+                    let actual = autostart::is_enabled();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(s) = status_window.upgrade() {
+                            s.set_autostart(actual);
+                            if let Err(e) = result {
+                                s.set_status_line(
+                                    format!("Paired; start at login could not be enabled: {e}")
+                                        .into(),
+                                );
+                            }
+                        }
+                    });
+                });
+            }
             if let Some(w) = pw.upgrade() {
                 let _ = w.hide();
             }
             if let Some(s) = sw.upgrade() {
-                s.set_status_line(if delivered {
-                    "Pairing approved — the Mac can connect now."
-                } else {
-                    EXPIRED_MSG
-                }
-                .into());
+                s.set_status_line(
+                    if delivered {
+                        "Pairing approved — the Mac can connect now."
+                    } else {
+                        EXPIRED_MSG
+                    }
+                    .into(),
+                );
             }
         });
     }
@@ -155,7 +186,14 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
                 let _ = w.hide();
             }
             if let Some(s) = sw.upgrade() {
-                s.set_status_line(if delivered { "Pairing declined." } else { EXPIRED_MSG }.into());
+                s.set_status_line(
+                    if delivered {
+                        "Pairing declined."
+                    } else {
+                        EXPIRED_MSG
+                    }
+                    .into(),
+                );
             }
         });
     }
@@ -176,7 +214,10 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let pw = pair_win.as_weak();
         let slot = answer.clone();
         Arc::new(move |req: &PairRequest| {
-            plog!("decide() entered for {:?} — asking the UI thread to show the dialog", req.peer_name);
+            plog!(
+                "decide() entered for {:?} — asking the UI thread to show the dialog",
+                req.peer_name
+            );
             let (tx, rx) = mpsc::channel::<bool>();
             match slot.lock() {
                 Ok(mut s) => *s = Some(tx),
@@ -216,7 +257,10 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
             let waited = std::time::Instant::now();
             let answered = match rx.recv_timeout(PAIR_DECISION_TIMEOUT) {
                 Ok(v) => {
-                    plog!("decide(): answered {v} after {:.1}s", waited.elapsed().as_secs_f32());
+                    plog!(
+                        "decide(): answered {v} after {:.1}s",
+                        waited.elapsed().as_secs_f32()
+                    );
                     v
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -448,9 +492,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
             };
             match cfg.save() {
                 Ok(_) => {
-                    s.set_status_line(
-                        "Paired Macs forgotten — pair again from each Mac.".into(),
-                    );
+                    s.set_status_line("Paired Macs forgotten — pair again from each Mac.".into());
                     // The listener holds the OLD key until it is restarted, and so
                     // does the pairing listener that would hand it out.
                     if listener.borrow().is_some() {
@@ -467,6 +509,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         // UAC prompt is already up gets two elevations racing to write the same
         // task and two status lines fighting over the answer.
         let busy = Arc::new(AtomicBool::new(false));
+        let cfg_startup = cfg_cell.clone();
         settings.on_autostart_changed(move |on| {
             if busy.swap(true, Ordering::SeqCst) {
                 if let Some(s) = sw.upgrade() {
@@ -475,6 +518,8 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
                 }
                 return;
             }
+            cfg_startup.borrow_mut().startup_configured = true;
+            let _ = cfg_startup.borrow().save();
             if let Some(s) = sw.upgrade() {
                 s.set_status_line("Asking Windows for permission — approve the prompt.".into());
             }

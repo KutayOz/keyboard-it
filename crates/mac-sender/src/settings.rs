@@ -48,7 +48,11 @@ enum PairState {
     /// deadline rather than a rendered string because this is the one state where
     /// the user has to physically go somewhere, and "how long have I got" is the
     /// only question they have. The 1 s tick re-renders the remaining time.
-    AwaitingApproval { peer: String, deadline: Instant },
+    AwaitingApproval {
+        peer: String,
+        code: String,
+        deadline: Instant,
+    },
     /// Terminal message, shown until `until` and then released back to Idle.
     Finished { text: String, until: Instant },
 }
@@ -164,7 +168,9 @@ define_class!(
         fn toggleAutostart(&self, _sender: Option<&AnyObject>) {
             let iv = self.ivars();
             let state: isize = unsafe { msg_send![&*iv.autostart_check, state] };
-            let _ = crate::autostart::set_enabled(state == 1);
+            if crate::autostart::set_enabled(state == 1).is_ok() {
+                let _ = protocol::config::Config::update(|c| c.startup_configured = true);
+            }
             self.sync_autostart();
         }
 
@@ -184,6 +190,14 @@ define_class!(
             }
             *iv.pair_state.lock().unwrap() = PairState::Busy(format!("Contacting {}…", peer.name));
             self.refresh_buttons();
+            if !load_config().startup_configured {
+                if let Err(e) = crate::autostart::set_enabled(true) {
+                    *iv.pair_state.lock().unwrap() = PairState::Idle;
+                    self.set_status(&format!("Could not enable start at login: {e}"), Duration::from_secs(8));
+                    return;
+                }
+                let _ = protocol::config::Config::update(|c| c.startup_configured = true);
+            }
             spawn_pairing(peer, iv.pair_state.clone());
         }
 
@@ -195,6 +209,8 @@ define_class!(
             cfg.shared_secret.clear();
             cfg.peer_host.clear();
             cfg.peer_ip.clear();
+            cfg.peer_device_id.clear();
+            crate::desktop::disconnect();
             match cfg.save() {
                 Ok(()) => {
                     crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed);
@@ -270,23 +286,35 @@ impl SettingsController {
         let pair_button = unsafe {
             NSButton::buttonWithTitle_target_action(ns_string!("Pair & Connect"), None, None, mtm)
         };
-        pair_button.setFrame(NSRect::new(NSPoint::new(294.0, 96.0), NSSize::new(150.0, 32.0)));
+        pair_button.setFrame(NSRect::new(
+            NSPoint::new(294.0, 96.0),
+            NSSize::new(150.0, 32.0),
+        ));
         // Return triggers pairing — the whole flow works keyboard-only.
         pair_button.setKeyEquivalent(ns_string!("\r"));
 
         let paired_label = label(ns_string!(""), 16.0, 103.0, 270.0);
-        let unpair_button =
-            unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Unpair"), None, None, mtm) };
-        unpair_button.setFrame(NSRect::new(NSPoint::new(16.0, 56.0), NSSize::new(100.0, 32.0)));
+        let unpair_button = unsafe {
+            NSButton::buttonWithTitle_target_action(ns_string!("Unpair"), None, None, mtm)
+        };
+        unpair_button.setFrame(NSRect::new(
+            NSPoint::new(16.0, 56.0),
+            NSSize::new(100.0, 32.0),
+        ));
 
         let autostart_check = unsafe {
             NSButton::checkboxWithTitle_target_action(ns_string!("Start at Login"), None, None, mtm)
         };
-        autostart_check.setFrame(NSRect::new(NSPoint::new(130.0, 64.0), NSSize::new(220.0, 18.0)));
+        autostart_check.setFrame(NSRect::new(
+            NSPoint::new(130.0, 64.0),
+            NSSize::new(220.0, 18.0),
+        ));
 
         let status_label = label(ns_string!(""), 16.0, 20.0, 428.0);
 
-        let content_view = window.contentView().expect("titled window has a content view");
+        let content_view = window
+            .contentView()
+            .expect("titled window has a content view");
         for view in [&*pc_label, &*hint, &*paired_label, &*status_label] {
             content_view.addSubview(view);
         }
@@ -381,8 +409,10 @@ impl SettingsController {
     fn refresh_buttons(&self) {
         let iv = self.ivars();
         let pairing = !matches!(*iv.pair_state.lock().unwrap(), PairState::Idle);
-        iv.pair_button.setEnabled(!pairing && self.selected_peer().is_some());
-        iv.unpair_button.setEnabled(!pairing && load_config().is_complete());
+        iv.pair_button
+            .setEnabled(!pairing && self.selected_peer().is_some());
+        iv.unpair_button
+            .setEnabled(!pairing && load_config().is_complete());
     }
 
     /// True once the browse has run long enough with nothing to show that
@@ -414,7 +444,11 @@ impl SettingsController {
     /// Mirror the LaunchAgent state (also toggled via the menu bar item).
     fn sync_autostart(&self) {
         let iv = self.ivars();
-        let disk: isize = if crate::autostart::is_enabled() { 1 } else { 0 };
+        let disk: isize = if !load_config().startup_configured || crate::autostart::is_enabled() {
+            1
+        } else {
+            0
+        };
         let shown: isize = unsafe { msg_send![&*iv.autostart_check, state] };
         if shown != disk {
             unsafe {
@@ -438,9 +472,13 @@ impl SettingsController {
                 // The instruction comes first and the clock second: the user is
                 // about to walk away from this screen, so what they carry with
                 // them has to be what to do, not how long they have.
-                PairState::AwaitingApproval { peer, deadline } => {
+                PairState::AwaitingApproval {
+                    peer,
+                    code,
+                    deadline,
+                } => {
                     let left = deadline.saturating_duration_since(Instant::now()).as_secs();
-                    Some(format!("Go to {peer} and click Allow — {left}s left"))
+                    Some(format!("{peer}: compare code {code}, then Allow — {left}s"))
                 }
                 PairState::Finished { text, until } => {
                     if Instant::now() < *until {
@@ -506,8 +544,7 @@ impl SettingsController {
             // Compare against item 0 rather than the selected item: whether a
             // freshly repopulated popup auto-selects anything is not something to
             // depend on, and if it did not, this would rebuild on every tick.
-            let have = (popup.numberOfItems() == 1)
-                .then(|| popup.itemTitleAtIndex(0).to_string());
+            let have = (popup.numberOfItems() == 1).then(|| popup.itemTitleAtIndex(0).to_string());
             if have.as_deref() != Some(want) {
                 popup.removeAllItems();
                 popup.addItemWithTitle(&NSString::from_str(want));
@@ -549,7 +586,10 @@ impl SettingsController {
 // pairing-key field. There are no text fields left, so it went with them.
 
 fn load_config() -> protocol::config::Config {
-    protocol::config::Config::load().ok().flatten().unwrap_or_default()
+    protocol::config::Config::load()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// This Mac's name as the user knows it ("Kutay's MacBook Pro"), shown in the
@@ -586,7 +626,10 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
 
         let Some(pair_port) = peer.pair_port else {
             done(
-                format!("{} is running an older keyboard-it — update it on the PC.", peer.name),
+                format!(
+                    "{} is running an older keyboard-it — update it on the PC.",
+                    peer.name
+                ),
                 8,
             );
             return;
@@ -620,12 +663,9 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
         // clock can: past the deadline, "declined" is the wrong word for it.
         let asked_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
         let asked_at_cb = asked_at.clone();
-        // The callback is not about the code (which is no longer shown anywhere —
-        // nobody compared it, so it was decoration). It fires at the one instant
-        // that matters: the handshake is done and the wait has turned into waiting
-        // for a human, which is when the read timeout has to grow — and when the
-        // receiver's own decision clock starts, so the countdown starts here too.
-        let result = protocol::pairing::pair_initiator(&mut stream, &name, |_code| {
+        // Show the handshake-derived comparison code during the one-time
+        // approval, and extend the socket deadline while the user checks it.
+        let result = protocol::pairing::pair_initiator(&mut stream, &name, |code| {
             if let Some(c) = &ctl {
                 let _ = c.set_read_timeout(Some(PAIR_DECISION_WAIT));
             }
@@ -634,6 +674,7 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
             }
             set(PairState::AwaitingApproval {
                 peer: peer.name.clone(),
+                code: protocol::pairing::code_display(code),
                 deadline: Instant::now() + protocol::PAIR_DECISION_TIMEOUT,
             });
         });
@@ -650,7 +691,10 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
                     .and_then(|g| *g)
                     .is_some_and(|t| t.elapsed() >= protocol::PAIR_DECISION_TIMEOUT);
                 if expired {
-                    done(format!("No answer on {} — the request expired.", peer.name), 10);
+                    done(
+                        format!("No answer on {} — the request expired.", peer.name),
+                        10,
+                    );
                 } else {
                     done(format!("{} declined the pairing.", peer.name), 8);
                 }
@@ -667,19 +711,29 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
         let mut cfg = load_config();
         cfg.role = protocol::config::Role::Sender;
         cfg.shared_secret = outcome.secret;
+        cfg.peer_device_id.clear();
+        cfg.desktop_port = peer.desktop_port.unwrap_or(protocol::desktop::DEFAULT_PORT);
         cfg.port = outcome.session_port;
         // Prefer the mDNS name — it follows the PC to a new IP.
-        cfg.peer_host =
-            if peer.hostname.is_empty() { peer.host.clone() } else { peer.hostname.clone() };
+        cfg.peer_host = if peer.hostname.is_empty() {
+            peer.host.clone()
+        } else {
+            peer.hostname.clone()
+        };
         cfg.peer_ip = peer.host.clone();
         if let Err(e) = cfg.save() {
-            done(format!("Paired, but the settings could not be saved: {e}"), 10);
+            done(
+                format!("Paired, but the settings could not be saved: {e}"),
+                10,
+            );
             return;
         }
         // The connection thread polls this (~1 s) and reconnects with the new
         // key and address — no restart.
         crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed);
-        done(format!("Paired with {} — connecting…", outcome.peer_name), 5);
+        done(
+            format!("Paired with {} — connecting…", outcome.peer_name),
+            5,
+        );
     });
 }
-

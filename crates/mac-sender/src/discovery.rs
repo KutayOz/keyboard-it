@@ -32,6 +32,8 @@ pub struct DiscoveredPeer {
     /// Pairing port from the TXT record. `None` means the PC is running a build
     /// from before pairing existed.
     pub pair_port: Option<u16>,
+    pub desktop_port: Option<u16>,
+    pub device_id: String,
 }
 
 /// How long the browse may return nothing before the UI stops saying
@@ -85,7 +87,9 @@ pub fn peers() -> Vec<DiscoveredPeer> {
 /// True once something has answered — i.e. Local Network access demonstrably
 /// works. Never goes back to false.
 pub fn ever_answered() -> bool {
-    SHARED.get().is_some_and(|s| s.ever_answered.load(Ordering::Relaxed))
+    SHARED
+        .get()
+        .is_some_and(|s| s.ever_answered.load(Ordering::Relaxed))
 }
 
 /// Time since the browse started; None when it has not been started.
@@ -126,13 +130,18 @@ fn spawn_browser(shared: Arc<Shared>) {
         while let Ok(event) = rx.recv() {
             match event {
                 ServiceEvent::ServiceResolved(info) => {
-                    let addrs: Vec<std::net::IpAddr> =
-                        info.get_addresses().iter().map(|a| a.to_ip_addr()).collect();
+                    let addrs: Vec<std::net::IpAddr> = info
+                        .get_addresses()
+                        .iter()
+                        .map(|a| a.to_ip_addr())
+                        .collect();
                     // Rank, do not `min()`. Four of the five records a receiver
                     // advertises are typically unreachable, and the old "filter to
                     // IPv4 first" only hid that: one receiver with no A record and
                     // the fallback picks `::1`. See protocol::addr_rank.
-                    let Some(ip) = protocol::pick_service_addr(addrs.iter()) else { continue };
+                    let Some(ip) = protocol::pick_service_addr(addrs.iter()) else {
+                        continue;
+                    };
                     let fullname = info.get_fullname().to_string();
                     let name = fullname
                         .strip_suffix(protocol::MDNS_SERVICE)
@@ -153,6 +162,14 @@ fn spawn_browser(shared: Arc<Shared>) {
                         hostname,
                         port: info.get_port(),
                         pair_port,
+                        desktop_port: info
+                            .get_property_val_str(protocol::desktop::TXT_PORT)
+                            .and_then(|s| s.parse().ok())
+                            .filter(|p| *p != 0),
+                        device_id: info
+                            .get_property_val_str(protocol::desktop::TXT_ID)
+                            .unwrap_or_default()
+                            .into(),
                     };
                     // Set before the list write: this is the "the network answered"
                     // signal, and it must hold even for a record we then drop.

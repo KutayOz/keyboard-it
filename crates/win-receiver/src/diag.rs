@@ -62,6 +62,7 @@ pub fn log(args: std::fmt::Arguments<'_>) {
     // Still to stdout: the debug build keeps a console, and watching a live
     // reproduction there beats tailing a file.
     print!("{line}");
+    if cfg!(test) { return; } // Never write test traces into the user’s real config folder.
     let Some(path) = log_path() else { return };
     let _guard = WRITE_LOCK.lock();
     if std::fs::metadata(&path).map(|m| m.len() > MAX_BYTES).unwrap_or(false) {

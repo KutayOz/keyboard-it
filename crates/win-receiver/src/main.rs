@@ -10,16 +10,17 @@
 
 use std::io;
 
-mod diag;
-mod inject;
-mod scancode;
-mod serve;
 #[cfg(windows)]
 mod autostart;
+mod desktop;
+mod diag;
 #[cfg(windows)]
 mod gui;
+mod inject;
 #[cfg(windows)]
 mod netinfo;
+mod scancode;
+mod serve;
 
 fn main() -> io::Result<()> {
     // Do not die silently on a broken config.toml (release builds have no console, so a
@@ -48,6 +49,13 @@ fn main() -> io::Result<()> {
         }
     } else {
         cfg_err
+    };
+
+    cfg.role = protocol::config::Role::Receiver;
+    cfg.ensure_identity();
+    let cfg_err = match cfg.save() {
+        Ok(()) => cfg_err,
+        Err(e) => Some(format!("Could not persist device identity/settings: {e}")),
     };
 
     #[cfg(windows)]

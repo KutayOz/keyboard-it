@@ -75,7 +75,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>keyboard-it — personal LAN keyboard/mouse bridge</string>
+	<string>keyboard-it — encrypted LAN remote desktop and keyboard/mouse bridge</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>keyboard-it finds your Windows PC on this network so you can pair with it without typing an IP address.</string>
 	<key>NSBonjourServices</key>
