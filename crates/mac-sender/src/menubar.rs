@@ -193,7 +193,9 @@ define_class!(
         #[unsafe(method(toggleStartup:))]
         fn toggle_startup(&self, sender: Option<&AnyObject>) {
             let now = crate::autostart::is_enabled();
-            let _ = crate::autostart::set_enabled(!now);
+            if crate::autostart::set_enabled(!now).is_ok() {
+                let _ = protocol::config::Config::update(|c| c.startup_configured = true);
+            }
             let enabled = crate::autostart::is_enabled();
             if let Some(item) = sender {
                 // NSControlStateValue: On=1, Off=0.
@@ -356,6 +358,32 @@ pub fn install_status_updater(
             permission_needed.load(Ordering::Relaxed),
             restart_needed.load(Ordering::Relaxed),
         );
+        // Settings and opening the viewer can change these without clicking the
+        // corresponding menu item; always reflect the authoritative state.
+        if let Some(menu) = status_item.menu(mtm) {
+            for (title, enabled) in [
+                (
+                    "Yalnız klavye/fare modu",
+                    !crate::desktop::shared().desktop_mode.load(Ordering::SeqCst),
+                ),
+                (
+                    "Metin panosunu paylaş",
+                    crate::desktop::shared().clipboard.load(Ordering::SeqCst),
+                ),
+                (
+                    "Bağlantıyı duraklat",
+                    crate::desktop::shared().paused.load(Ordering::SeqCst),
+                ),
+                ("Start at Login", crate::autostart::is_enabled()),
+            ] {
+                if let Some(item) = menu.itemWithTitle(&NSString::from_str(title)) {
+                    unsafe {
+                        let _: () =
+                            msg_send![&*item, setState: if enabled { 1isize } else { 0isize }];
+                    }
+                }
+            }
+        }
         if last.get() != Some(now) {
             last.set(Some(now));
             if let Some(button) = status_item.button(mtm) {
