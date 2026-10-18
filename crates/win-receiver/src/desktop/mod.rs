@@ -320,6 +320,7 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
             }
             if let Some((cap, enc)) = &mut pipeline {
                 let before_capture = Instant::now();
+                let mut capture_failed = false;
                 let encoded = if enc.uses_gpu_surfaces() {
                     match cap.gpu_frame() {
                         Ok(frame) => {
@@ -332,7 +333,10 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                             encode_us += before_encode.elapsed().as_micros() as u64;
                             result
                         }
-                        Err(e) => Err(e),
+                        Err(e) => {
+                            capture_failed = true;
+                            Err(e)
+                        }
                     }
                 } else {
                     match cap.frame() {
@@ -350,7 +354,10 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                             encode_us += before_encode.elapsed().as_micros() as u64;
                             result
                         }
-                        Err(e) => Err(e),
+                        Err(e) => {
+                            capture_failed = true;
+                            Err(e)
+                        }
                     }
                 };
                 stat_attempts += 1;
@@ -377,10 +384,12 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                         }
                     }
                     Ok(_) if last_output.elapsed() > Duration::from_secs(2) => {
-                        if enc.uses_gpu_surfaces() {
-                            allow_gpu = false;
-                        } else if enc.hardware {
-                            allow_hardware = false;
+                        if !capture_failed {
+                            if enc.uses_gpu_surfaces() {
+                                allow_gpu = false;
+                            } else if enc.hardware {
+                                allow_hardware = false;
+                            }
                         }
                         let mut a = activity.lock().unwrap();
                         a.ready = false;
@@ -395,10 +404,12 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                     Ok(_) => {}
                     Err(e) => {
                         crate::diag::plog!("desktop pipeline error: {e}");
-                        if enc.uses_gpu_surfaces() {
-                            allow_gpu = false;
-                        } else if enc.hardware {
-                            allow_hardware = false;
+                        if !capture_failed {
+                            if enc.uses_gpu_surfaces() {
+                                allow_gpu = false;
+                            } else if enc.hardware {
+                                allow_hardware = false;
+                            }
                         }
                         let mut a = activity.lock().unwrap();
                         a.ready = false;
