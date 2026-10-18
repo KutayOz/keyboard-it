@@ -73,6 +73,8 @@ Automated commands:
 ```sh
 cargo test --workspace --locked
 cargo check --workspace --locked
+# macOS-only: exercise AppKit + VideoToolbox + AVSampleBufferDisplayLayer on the main thread
+cargo run -p mac-sender --locked -- --check-viewer
 # Optional cross-platform type checking from macOS (install this Rust target first):
 cargo check -p win-receiver --target x86_64-pc-windows-gnu --tests --locked
 ```
@@ -80,7 +82,9 @@ cargo check -p win-receiver --target x86_64-pc-windows-gnu --tests --locked
 The suite covers protocol limits/reassembly, mismatched versions/keys, authenticated
 reconnection, unauthenticated socket isolation, port collision fallback, stale-owner cleanup,
 clipboard echo/reconnect behavior, pointer mapping, and real VideoToolbox decoding using a
-small generated H.264 test-pattern fixture. Windows-native tests also exercise the software
+small generated H.264 test-pattern fixture. A main-thread native viewer smoke check also
+validates full-screen window configuration and the Objective-C display-layer calls without
+showing a window or requesting input permissions. Windows-native tests also exercise the software
 Media Foundation encoder without requiring screen capture. Native macOS and Windows CI jobs
 run tests before packaging `.dmg` and `.msi` artifacts.
 

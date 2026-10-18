@@ -483,3 +483,39 @@ pub fn handle_event(kind: CGEventType, event: &CGEvent) -> Option<CallbackResult
         }
     }))
 }
+
+/// Native main-thread smoke check; no windows are shown, no input tap or real
+/// configuration is opened. Kept out of distribution builds.
+#[cfg(debug_assertions)]
+pub fn check_viewer() -> std::io::Result<()> {
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| std::io::Error::other("AppKit requires main thread"))?;
+    let _app = NSApplication::sharedApplication(mtm);
+    let viewer = Viewer::create(mtm);
+    let mut decoder = super::video::Decoder::default();
+    let frame = decoder
+        .decode(include_bytes!("../../tests/fixtures/desktop.h264"))
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| std::io::Error::other("No decoded frame"))?;
+    let sample = frame.sample().map_err(std::io::Error::other)?;
+    unsafe {
+        let _: () = msg_send![&*viewer.ivars().layer,enqueueSampleBuffer:sample.0];
+        let status: isize = msg_send![&*viewer.ivars().layer, status];
+        if status == 2 {
+            return Err(std::io::Error::other("AVSampleBufferDisplayLayer failed"));
+        }
+        let _: () = msg_send![&*viewer.ivars().layer, flushAndRemoveImage];
+    }
+    if !viewer
+        .ivars()
+        .window
+        .collectionBehavior()
+        .contains(NSWindowCollectionBehavior::FullScreenPrimary)
+    {
+        return Err(std::io::Error::other(
+            "Window cannot create a full-screen Space",
+        ));
+    }
+    println!("Native viewer, VideoToolbox and display layer smoke check passed.");
+    Ok(())
+}

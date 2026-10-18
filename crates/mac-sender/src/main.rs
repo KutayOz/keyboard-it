@@ -74,6 +74,10 @@ fn send_hello(cfg: &Config) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if args.get(1).map(String::as_str) == Some("--check-viewer") {
+        return desktop::check_viewer();
+    }
     let hello_mode = args.get(1).map(String::as_str) == Some("--hello");
     let ip_arg = if hello_mode { args.get(2) } else { args.get(1) };
 

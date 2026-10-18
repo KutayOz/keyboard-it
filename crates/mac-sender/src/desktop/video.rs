@@ -157,15 +157,26 @@ impl Frame {
                     kCFBooleanTrue,
                 );
             }
-            Ok(Sample(sample))
+            Ok(Sample(sample.cast()))
         }
     }
 }
-pub struct Sample(pub Ref);
+// Preserve CoreMedia's Objective-C pointer encoding. A raw void pointer has
+// the same ABI but objc2 correctly rejects it for enqueueSampleBuffer:.
+#[repr(C)]
+pub struct OpaqueSampleBuffer {
+    _private: [u8; 0],
+}
+unsafe impl objc2::encode::RefEncode for OpaqueSampleBuffer {
+    const ENCODING_REF: objc2::encode::Encoding = objc2::encode::Encoding::Pointer(
+        &objc2::encode::Encoding::Struct("opaqueCMSampleBuffer", &[]),
+    );
+}
+pub struct Sample(pub *mut OpaqueSampleBuffer);
 impl Drop for Sample {
     fn drop(&mut self) {
         unsafe {
-            CFRelease(self.0);
+            CFRelease(self.0.cast());
         }
     }
 }

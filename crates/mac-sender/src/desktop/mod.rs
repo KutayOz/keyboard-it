@@ -16,6 +16,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(debug_assertions)]
+pub use viewer::check_viewer;
 pub use viewer::{handle_event, open, release_ui};
 
 #[derive(Default)]

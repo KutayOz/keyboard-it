@@ -35,6 +35,8 @@ jobs:
       # local packaging run share.
       - name: Native macOS tests (including VideoToolbox decode)
         run: cargo test --workspace --locked
+      - name: Native AppKit viewer smoke check (no windows shown)
+        run: cargo run -p mac-sender --locked -- --check-viewer
       - name: Package .app + .dmg
         run: bash packaging/mac/package.sh
       - uses: actions/upload-artifact@v4
