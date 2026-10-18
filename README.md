@@ -1,14 +1,28 @@
 # keyboard-it
 
-Use a MacBook's keyboard and trackpad to control a Windows PC over the local network.
+View and control a Windows PC from your MacBook over the local network.
 
-keyboard-it is a small software KVM: a menu bar app on the Mac captures keyboard and mouse
-input and streams it, encrypted, to a tray app on the Windows machine, which injects it into
-whatever window has focus. No extra hardware, no cloud — one TCP connection on your LAN.
-Double-tap the Fn key to switch input between the two machines.
+keyboard-it pairs once, then reconnects automatically when both computers are available.
+Choose **Windows’u Aç** in the Mac menu bar to open the PC's existing desktop in a native
+macOS full-screen Space. Switching to another Space returns keyboard and mouse control to
+the Mac immediately. Text clipboard sharing works in both directions while the Windows
+viewer is focused and can be disabled in the menu.
 
-Setup is two clicks and nothing to type: the Mac finds the PC on the network, you pick it,
-and the PC asks whether to allow it.
+The Windows receiver captures the primary monitor with Desktop Duplication, encodes H.264
+using Media Foundation (hardware first, software fallback), and sends it over a separately
+authenticated, encrypted Noise channel. macOS decodes with VideoToolbox. No SSH, RDP account,
+external remote-desktop application, or cloud service is required.
+
+The original keyboard/mouse-only workflow remains available as **Yalnız klavye/fare modu**:
+double-tap Fn to switch input between computers. Existing pairings and the legacy input
+protocol remain compatible. Screen sharing requires the updated app on **both** computers.
+
+**Requirements:** same LAN, an awake Windows 10/11 PC with a signed-in user and an active
+connected monitor. This version does not include internet access, headless displays, audio,
+file transfer, or control of the Windows sign-in/UAC secure desktop. Screen streaming
+resumes when the normal desktop becomes available again.
+
+See [Remote desktop setup, architecture and validation](docs/remote-desktop.md).
 
 ## How it works
 
@@ -130,7 +144,7 @@ One thing the app cannot set for you: System Settings → Keyboard → "Press fn
 **Do Nothing**. Otherwise macOS grabs double-Fn for Dictation or the emoji picker and the
 toggle misfires.
 
-The app lives in the menu bar (no Dock icon): **Permissions** reopens the window above,
+The app lives in the menu bar; its Dock icon appears while the Windows viewer is open: **Permissions** reopens the window above,
 **Settings** opens the settings window, **Start at Login** toggles a LaunchAgent, and
 **Quit** exits and restores normal cursor behavior.
 
@@ -151,11 +165,11 @@ and both on the same network:
 1. On the Mac, open **Settings** from the menu bar. Your PC appears in the list within a
    few seconds.
 2. Pick it and click **Pair & Connect**.
-3. On the PC, a window asks *"Allow this Mac to control this PC?"* Click **Allow**.
+3. Compare the short code on both computers. On the PC, approve **Allow** only when the codes match.
 
 That's it — the Mac stores the key the PC hands over and connects within about a second.
 
-Your click is the whole security check, so it is worth a second of attention: whoever you
+Comparing the short code and approving the request is the security check: whoever you
 allow can type and click on your PC for as long as the pairing lasts. Allow a machine you
 recognise, on a network you trust — see [Security model](#security-model) for what that
 does and does not cover.
@@ -219,14 +233,10 @@ runs `Noise_NN` — ephemeral keys only, no PSK — which is encrypted but *unau
 The gate is consent, not cryptography: no Mac gets a key unless someone at the PC clicks
 **Allow**.
 
-One gap is left open deliberately. Both sides can derive a short code from the handshake
-hash, which commits to both ephemeral public keys — an active attacker has to run two
-separate handshakes and so cannot make both codes match. That code used to be shown on both
-screens for the user to compare. It is not any more, because a code nobody compares
-protects nobody, and nobody compared it. What that costs: someone able to intercept traffic
-on your LAN during the few seconds a pairing is in flight can sit in the middle and come
-away holding the key. Pair on a network you trust. (`protocol::pairing` still derives the
-code and never puts it on the wire, so bringing it back is a UI change, not a protocol one.)
+Both screens show a short code derived from the Noise handshake hash. Compare them before
+allowing the request: an active intermediary establishes two different handshakes, so the
+codes will differ. The receiver still requires explicit consent; the discovery name alone
+is never proof of identity.
 
 The receiver limits abuse of that dialog: one request at a time, a 10-second I/O timeout, a
 two-minute auto-decline, and a cooldown after a decline. That deadline lives in
@@ -234,6 +244,11 @@ two-minute auto-decline, and a cooldown after a decline. That deadline lives in
 promises about it to two different people — when it was defined separately the PC gave up
 at 60 s while the Mac promised nothing, and a click that arrived at 60.6 s was reported as
 "approved" on the PC and as a rejection on the Mac.
+
+**Remote desktop (default port 5601).** A separate Noise NNpsk0 channel derives a
+domain-separated key from the existing pairing key and negotiates its own version and device
+identity. Desktop data, input and text clipboard are encrypted. A new connection replaces
+an old session only after authentication. Video and clipboard reassembly are bounded.
 
 **Everywhere.**
 

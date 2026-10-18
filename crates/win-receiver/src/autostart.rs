@@ -27,7 +27,7 @@ pub fn set_enabled(on: bool) -> io::Result<()> {
         let exe = std::env::current_exe()?;
         // /TR value = quoted exe path (for Program Files with spaces): /TR "\"<exe>\""
         format!(
-            "/Create /TN {TASK} /TR \"\\\"{}\\\"\" /SC ONLOGON /RL HIGHEST /F",
+            "/Create /TN {TASK} /TR \"\\\"{}\\\"\" /SC ONLOGON /IT /RL HIGHEST /F",
             exe.display()
         )
     } else {

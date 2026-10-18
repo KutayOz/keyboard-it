@@ -17,6 +17,8 @@ mod autostart;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
+mod desktop;
+#[cfg(target_os = "macos")]
 mod discovery;
 #[cfg(target_os = "macos")]
 mod keymap;
@@ -48,13 +50,21 @@ fn send_hello(cfg: &Config) -> io::Result<()> {
         protocol::secure::send_event(
             &mut t,
             &mut stream,
-            &InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }),
+            &InputEvent::Key(KeyEvent {
+                msg: MsgType::Down,
+                hid_usage: hid,
+                modifiers: 0,
+            }),
         )?;
         sleep(Duration::from_millis(15));
         protocol::secure::send_event(
             &mut t,
             &mut stream,
-            &InputEvent::Key(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }),
+            &InputEvent::Key(KeyEvent {
+                msg: MsgType::Up,
+                hid_usage: hid,
+                modifiers: 0,
+            }),
         )?;
         sleep(Duration::from_millis(40));
     }
@@ -76,16 +86,23 @@ fn main() -> io::Result<()> {
         Ok(Some(c)) => c,
         Ok(None) => {
             // First run: create the default template that 'Settings...' will open.
-            let c = protocol::config::Config { role: Role::Sender, ..Default::default() };
+            let c = protocol::config::Config {
+                role: Role::Sender,
+                ..Default::default()
+            };
             let _ = c.save();
             c
         }
         Err(e) => {
-            eprintln!("failed to read config ({e}) — continuing with defaults; fix via 'Settings...'.");
+            eprintln!(
+                "failed to read config ({e}) — continuing with defaults; fix via 'Settings...'."
+            );
             protocol::config::Config::default()
         }
     };
     cfg.role = Role::Sender;
+    cfg.ensure_identity();
+    let _ = cfg.save();
     if let Some(ip) = ip_arg {
         cfg.peer_host = ip.clone();
         let _ = cfg.save(); // so later runs need no argument

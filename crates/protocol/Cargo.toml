@@ -5,7 +5,7 @@ edition = "2021"
 
 # The "bridge" shared by both binaries + the LAN encryption layer.
 [dependencies]
-snow = "0.10"   # Noise protocol; default features are 25519 + ChaChaPoly + BLAKE2s
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "default-resolver-crypto"] }   # Noise protocol; default features are 25519 + ChaChaPoly + BLAKE2s
 blake2 = "0.10" # compresses the passphrase into a 32-byte PSK (BLAKE2s-256)
 getrandom = "0.3" # OS RNG for generate_key(); already a transitive dep of snow — adds nothing new
 directories = "6" # OS-standard config dir

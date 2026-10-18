@@ -104,10 +104,12 @@ export component PairRequestWindow inherits Window {
     // 60s timeout, and both of those decline. The height carries slack on purpose so a
     // 64-byte peer name wrapping to two or three lines still cannot push the buttons out.
     min-width: 360px;
-    min-height: 340px;
+    min-height: 390px;
     always-on-top: true;
 
     in property <string> peer-name;
+    in-out property <bool> start-at-login: true;
+    in property <bool> offer-startup: true;
     in property <string> code;        // pre-formatted "482 913"
 
     callback allow();
@@ -144,6 +146,10 @@ export component PairRequestWindow inherits Window {
             wrap: word-wrap;
         }
 
+        if root.offer-startup: CheckBox {
+            text: "Start at login (Windows asks permission once)";
+            checked <=> root.start-at-login;
+        }
         HorizontalBox {
             spacing: 8px;
             Button { text: "Deny"; clicked => { root.deny(); } }

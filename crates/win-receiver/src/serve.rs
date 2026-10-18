@@ -4,7 +4,6 @@
 //! Each connection runs on its OWN thread and "newest connection wins": when the Mac
 //! wakes from sleep and reconnects, the half-open dead session is dropped immediately.
 
-use std::collections::HashSet;
 use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +12,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::pairing::{PairDecision, PairRequest};
-use protocol::{InputEvent, KeyEvent, MsgType};
 
 use crate::diag::plog;
 use crate::inject;
@@ -81,6 +79,7 @@ fn handle_client(
     psk: &[u8; 32],
     conn: &ConnSlot,
     on_conn: &OnConn,
+    stop: &AtomicBool,
 ) {
     let peer = stream.peer_addr().ok();
     let _ = stream.set_nodelay(true);
@@ -109,7 +108,7 @@ fn handle_client(
                     | io::ErrorKind::ConnectionReset
                     | io::ErrorKind::ConnectionAborted
             );
-            if clear_if_current(conn, my_gen) && !network {
+            if conn.lock().unwrap().is_none() && !inject::connected() && !network {
                 on_conn(ConnStatus::HandshakeFailed);
             }
             return;
@@ -118,55 +117,30 @@ fn handle_client(
     // Handshake done: drop the timeout (idling is legitimate); from here on a dead
     // connection is caught by TCP keepalive.
     let _ = stream.set_read_timeout(None);
+    let owner = {
+        let mut slot = conn.lock().unwrap();
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some((_, old)) = slot.take() {
+            let _ = old.shutdown(Shutdown::Both);
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        *slot = Some((my_gen, clone));
+        inject::acquire()
+    };
     on_conn(ConnStatus::Connected);
-
-    let mut held: HashSet<u16> = HashSet::new();
-    let mut held_btns: HashSet<u8> = HashSet::new();
-    loop {
-        match protocol::secure::recv_event(&mut transport, &mut stream) {
-            Ok(ev) => match ev {
-                InputEvent::Key(ke) => {
-                    match ke.msg {
-                        MsgType::Down | MsgType::Repeat => {
-                            held.insert(ke.hid_usage);
-                        }
-                        MsgType::Up => {
-                            held.remove(&ke.hid_usage);
-                        }
-                    }
-                    inject::handle(ke);
-                }
-                InputEvent::MouseButton { button, down } => {
-                    if down {
-                        held_btns.insert(button);
-                    } else {
-                        held_btns.remove(&button);
-                    }
-                    inject::handle_mouse(ev);
-                }
-                InputEvent::MouseMove { .. } | InputEvent::Scroll { .. } => inject::handle_mouse(ev),
-            },
-            Err(e) => {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    println!("connection closed: {peer:?}");
-                } else {
-                    eprintln!("read/decode error: {e}");
-                }
-                for hid in held.drain() {
-                    inject::handle(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 });
-                }
-                for button in held_btns.drain() {
-                    inject::handle_mouse(InputEvent::MouseButton { button, down: false });
-                }
-                // Only report status if we are still the current connection; if Stop or
-                // a newer connection took over, do not clobber their message.
-                if clear_if_current(conn, my_gen) {
-                    on_conn(ConnStatus::Disconnected);
-                }
-                break;
-            }
+    while let Ok(ev) = protocol::secure::recv_event(&mut transport, &mut stream) {
+        if !inject::event(owner, ev) {
+            break;
         }
     }
+    if clear_if_current(conn, my_gen) && inject::owned(owner) {
+        on_conn(ConnStatus::Disconnected);
+    }
+    inject::retire(owner);
 }
 
 /// Interruptible accept loop. Returns when `stop` turns true. Each connection gets its
@@ -180,6 +154,7 @@ fn accept_loop(
     on_conn: &OnConn,
 ) {
     let mut generation: u64 = 0;
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -187,27 +162,18 @@ fn accept_loop(
                 let my_gen = generation;
                 set_keepalive(&stream);
 
-                // Cut the old connection + put the clone into the slot — all under the
-                // lock so a race with Stop cannot leave an orphaned live connection.
-                {
-                    let mut slot = conn.lock().unwrap();
-                    if stop.load(Ordering::Relaxed) {
-                        let _ = stream.shutdown(Shutdown::Both);
-                        break;
-                    }
-                    if let Some((_, old)) = slot.take() {
-                        println!("new connection — cutting the old session");
-                        let _ = old.shutdown(Shutdown::Both);
-                    }
-                    if let Ok(c) = stream.try_clone() {
-                        *slot = Some((my_gen, c));
-                    }
+                if pending.fetch_add(1, Ordering::SeqCst) >= 4 {
+                    pending.fetch_sub(1, Ordering::SeqCst);
+                    continue;
                 }
-
-                let psk = psk;
                 let conn = conn.clone();
                 let on_conn = on_conn.clone();
-                thread::spawn(move || handle_client(stream, my_gen, &psk, &conn, &on_conn));
+                let stop = stop.clone();
+                let pending = pending.clone();
+                thread::spawn(move || {
+                    handle_client(stream, my_gen, &psk, &conn, &on_conn, &stop);
+                    pending.fetch_sub(1, Ordering::SeqCst);
+                });
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(100));
@@ -280,7 +246,11 @@ fn handle_pair(mut stream: TcpStream, ctx: &PairCtx) -> bool {
         |req| decide(req),
     ) {
         Ok(PairDecision::Accepted(req)) => {
-            plog!("paired with {:?} ({peer:?}) after {:.1}s", req.peer_name, t0.elapsed().as_secs_f32());
+            plog!(
+                "paired with {:?} ({peer:?}) after {:.1}s",
+                req.peer_name,
+                t0.elapsed().as_secs_f32()
+            );
             true
         }
         Ok(PairDecision::Declined(req)) => {
@@ -297,7 +267,10 @@ fn handle_pair(mut stream: TcpStream, ctx: &PairCtx) -> bool {
             // worth surfacing in the UI — but it IS worth recording, because a
             // request that dies here never reaches `decide` and so never puts a
             // dialog on screen.
-            plog!("pairing attempt from {peer:?} failed after {:.1}s: {e}", t0.elapsed().as_secs_f32());
+            plog!(
+                "pairing attempt from {peer:?} failed after {:.1}s: {e}",
+                t0.elapsed().as_secs_f32()
+            );
             false
         }
     }
@@ -331,7 +304,9 @@ fn pair_accept_loop(listener: TcpListener, ctx: Arc<PairCtx>, stop: &Arc<AtomicB
                 }
                 // swap, not store: whoever flips false->true owns the dialog.
                 if ctx.busy.swap(true, Ordering::SeqCst) {
-                    plog!("request from {peer:?} REJECTED: another request already owns the dialog");
+                    plog!(
+                        "request from {peer:?} REJECTED: another request already owns the dialog"
+                    );
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
                 }
@@ -377,7 +352,9 @@ fn start_pair_listener(
     let preferred = protocol::default_pairing_port(cfg.port);
     let listener = TcpListener::bind(("0.0.0.0", preferred))
         .or_else(|e| {
-            eprintln!("pairing port {preferred} unavailable ({e}); falling back to an ephemeral port");
+            eprintln!(
+                "pairing port {preferred} unavailable ({e}); falling back to an ephemeral port"
+            );
             TcpListener::bind(("0.0.0.0", 0))
         })
         .ok()?;
@@ -385,7 +362,10 @@ fn start_pair_listener(
     if listener.set_nonblocking(true).is_err() {
         return None;
     }
-    plog!("pairing listener on 0.0.0.0:{port} (session port {})", cfg.port);
+    plog!(
+        "pairing listener on 0.0.0.0:{port} (session port {})",
+        cfg.port
+    );
 
     let ctx = Arc::new(PairCtx {
         secret,
@@ -408,7 +388,12 @@ fn start_pair_listener(
 ///
 /// Deliberately not `#[cfg(windows)]`: the macOS dry-run has to be discoverable
 /// too, or the whole pairing flow cannot be exercised on one machine.
-fn advertise_mdns(port: u16, pair_port: Option<u16>) -> Option<(mdns_sd::ServiceDaemon, String)> {
+fn advertise_mdns(
+    port: u16,
+    pair_port: Option<u16>,
+    desktop_port: Option<u16>,
+    device_id: &str,
+) -> Option<(mdns_sd::ServiceDaemon, String)> {
     let host = this_device_name();
     let daemon = match mdns_sd::ServiceDaemon::new() {
         Ok(d) => d,
@@ -455,6 +440,14 @@ fn advertise_mdns(port: u16, pair_port: Option<u16>) -> Option<(mdns_sd::Service
         props.insert(protocol::MDNS_TXT_PAIR_PORT.to_string(), p.to_string());
     }
 
+    props.insert(protocol::desktop::TXT_ID.into(), device_id.into());
+    if let Some(p) = desktop_port {
+        props.insert(protocol::desktop::TXT_PORT.into(), p.to_string());
+        props.insert(
+            protocol::desktop::TXT_VERSION.into(),
+            protocol::desktop::VERSION.to_string(),
+        );
+    }
     // No explicit IP list: addr_auto lets the daemon track interface addresses itself,
     // so the advertisement stays correct when the PC switches networks while running.
     let info = match mdns_sd::ServiceInfo::new(
@@ -485,6 +478,7 @@ fn advertise_mdns(port: u16, pair_port: Option<u16>) -> Option<(mdns_sd::Service
 
 /// Stoppable listener handle.
 pub struct Handle {
+    desktop: Option<crate::desktop::Handle>,
     stop: Arc<AtomicBool>,
     conn: ConnSlot,
     thread: Option<JoinHandle<()>>,
@@ -501,6 +495,7 @@ impl Handle {
     /// connection, join the accept thread (the accept loop does not block, so the join
     /// returns quickly).
     pub fn stop(&mut self) {
+        self.desktop.take();
         if let Some((daemon, fullname)) = self.mdns.take() {
             // Wait briefly for the unregister so the "goodbye" packets actually leave
             // before the daemon is shut down; ignore errors — stopping must not fail.
@@ -543,11 +538,15 @@ pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
     let psk = protocol::secure::psk_from_config_or_env(cfg)?; // key error -> GUI
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))?; // port error -> GUI
     listener.set_nonblocking(true)?;
-    println!("win-receiver listening on 0.0.0.0:{} — waiting for connection", cfg.port);
+    println!(
+        "win-receiver listening on 0.0.0.0:{} — waiting for connection",
+        cfg.port
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let conn: ConnSlot = Arc::new(Mutex::new(None));
     let on_conn: OnConn = Arc::new(on_conn);
+    let desktop = crate::desktop::start(cfg, on_conn.clone()).ok();
     let (s, c) = (stop.clone(), conn.clone());
     let thread = thread::spawn(move || accept_loop(listener, psk, &s, &c, &on_conn));
 
@@ -560,7 +559,13 @@ pub fn start<F: Fn(ConnStatus) + Send + Sync + 'static>(
         conn,
         thread: Some(thread),
         pair: pair.map(|(_, stop, thread)| (stop, thread)),
-        mdns: advertise_mdns(cfg.port, pair_port),
+        mdns: advertise_mdns(
+            cfg.port,
+            pair_port,
+            desktop.as_ref().map(|h| h.port),
+            &cfg.device_id,
+        ),
+        desktop,
     })
 }
 
@@ -576,7 +581,10 @@ pub fn serve(
     let psk = protocol::secure::psk_from_config_or_env(cfg)?;
     let listener = TcpListener::bind(("0.0.0.0", cfg.port))?;
     listener.set_nonblocking(true)?;
-    println!("win-receiver listening on 0.0.0.0:{} — waiting for connection", cfg.port);
+    println!(
+        "win-receiver listening on 0.0.0.0:{} — waiting for connection",
+        cfg.port
+    );
 
     let decide: PairDecide = Arc::new(|req: &PairRequest| {
         println!(
@@ -587,8 +595,14 @@ pub fn serve(
         true
     });
     // Held for the lifetime of the process: dropping it would stop the loop.
+    let _desktop = crate::desktop::start(cfg, Arc::new(|_| {})).ok();
     let _pair = start_pair_listener(cfg, decide);
-    let _mdns = advertise_mdns(cfg.port, _pair.as_ref().map(|(p, _, _)| *p));
+    let _mdns = advertise_mdns(
+        cfg.port,
+        _pair.as_ref().map(|(p, _, _)| *p),
+        _desktop.as_ref().map(|h| h.port),
+        &cfg.device_id,
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let conn: ConnSlot = Arc::new(Mutex::new(None));

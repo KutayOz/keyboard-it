@@ -140,6 +140,8 @@ define_class!(
         // terminate: (Quit menu item) fires on the main thread right before exit.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            crate::desktop::release_ui();
+            crate::desktop::disconnect();
             reassociate_cursor();
         }
     }
@@ -155,6 +157,24 @@ define_class!(
         // Menu "Settings..." -> the native settings window (settings.rs). The old
         // config.toml-in-a-text-editor path (Config::edit) is gone from the menu:
         // a non-technical user never has to see the file.
+        #[unsafe(method(openDesktop:))]
+        fn open_desktop(&self, _sender: Option<&AnyObject>) { crate::desktop::open(self.mtm()); }
+        #[unsafe(method(toggleDesktopMode:))]
+        fn toggle_desktop_mode(&self, sender: Option<&AnyObject>) {
+            crate::desktop::toggle_mode();
+            if let Some(item) = sender { unsafe { let _: () = msg_send![item, setState: if crate::desktop::shared().desktop_mode.load(Ordering::SeqCst) { 0isize } else { 1isize }]; } }
+        }
+        #[unsafe(method(toggleClipboard:))]
+        fn toggle_clipboard(&self, sender: Option<&AnyObject>) {
+            crate::desktop::toggle_clipboard();
+            if let Some(item) = sender { unsafe { let _: () = msg_send![item, setState: if crate::desktop::shared().clipboard.load(Ordering::SeqCst) { 1isize } else { 0isize }]; } }
+        }
+        #[unsafe(method(toggleConnection:))]
+        fn toggle_connection(&self, sender: Option<&AnyObject>) {
+            crate::desktop::toggle_connection();
+            if let Some(item) = sender { unsafe { let _: () = msg_send![item, setState: if crate::desktop::shared().paused.load(Ordering::SeqCst) { 1isize } else { 0isize }]; } }
+        }
+
         #[unsafe(method(settings:))]
         fn settings(&self, _sender: Option<&AnyObject>) {
             crate::settings::open(self.mtm());
@@ -220,6 +240,39 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     let menu = NSMenu::new(mtm);
+    let cfg = protocol::config::Config::load()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    for (title, action, checked) in [
+        ("Windows’u Aç", sel!(openDesktop:), false),
+        (
+            "Yalnız klavye/fare modu",
+            sel!(toggleDesktopMode:),
+            !cfg.desktop_mode,
+        ),
+        (
+            "Metin panosunu paylaş",
+            sel!(toggleClipboard:),
+            cfg.clipboard_enabled,
+        ),
+        ("Bağlantıyı duraklat", sel!(toggleConnection:), false),
+    ] {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                ns_string!(""),
+            )
+        };
+        unsafe {
+            item.setTarget(Some(&delegate));
+            let _: () = msg_send![&*item, setState: if checked { 1isize } else { 0isize }];
+        }
+        menu.addItem(&item);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
     let permissions_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -293,7 +346,12 @@ pub fn install_status_updater(
     let last: Cell<Option<(bool, u8, bool, bool)>> = Cell::new(None);
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
         let now = (
-            active.load(Ordering::Relaxed),
+            active.load(Ordering::Relaxed)
+                || (crate::desktop::shared().visible.load(Ordering::SeqCst)
+                    && crate::desktop::shared()
+                        .input_enabled
+                        .load(Ordering::SeqCst)
+                    && crate::desktop::shared().snapshot.lock().unwrap().ready),
             conn.load(Ordering::Relaxed),
             permission_needed.load(Ordering::Relaxed),
             restart_needed.load(Ordering::Relaxed),

@@ -24,6 +24,18 @@ pub enum Role {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub peer_device_id: String,
+    #[serde(default = "default_desktop_port")]
+    pub desktop_port: u16,
+    #[serde(default = "yes")]
+    pub desktop_mode: bool,
+    #[serde(default = "yes")]
+    pub clipboard_enabled: bool,
+    #[serde(default)]
+    pub startup_configured: bool,
+    #[serde(default)]
     pub shared_secret: String, // pairing key; SAME on both sides, hashed into the PSK with BLAKE2s
     #[serde(default)]
     pub peer_host: String, // the sender knows the peer IP/host; the receiver only listens
@@ -39,6 +51,13 @@ pub struct Config {
     pub port: u16,
 }
 
+fn yes() -> bool {
+    true
+}
+fn default_desktop_port() -> u16 {
+    crate::desktop::DEFAULT_PORT
+}
+
 fn default_port() -> u16 {
     crate::DEFAULT_PORT // 5599
 }
@@ -46,6 +65,12 @@ fn default_port() -> u16 {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            device_id: String::new(),
+            peer_device_id: String::new(),
+            desktop_port: default_desktop_port(),
+            desktop_mode: true,
+            clipboard_enabled: true,
+            startup_configured: false,
             shared_secret: String::new(),
             peer_host: String::new(),
             peer_ip: String::new(),
@@ -55,7 +80,22 @@ impl Default for Config {
     }
 }
 
+static CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Config {
+    pub fn ensure_identity(&mut self) {
+        if self.device_id.is_empty() {
+            self.device_id = crate::secure::generate_key();
+        }
+    }
+    /// Reload-and-update transaction for background address/identity refreshes.
+    pub fn update(f: impl FnOnce(&mut Config)) -> io::Result<()> {
+        let _lock = CONFIG_WRITE.lock().unwrap();
+        let mut cfg = Self::load()?.unwrap_or_default();
+        f(&mut cfg);
+        cfg.save_inner()
+    }
+
     /// Is first-run setup done? The sender needs somewhere to connect to; the
     /// receiver only needs the secret. Uses the same address list the sender
     /// actually dials, so "complete" can never disagree with "connectable".
@@ -94,13 +134,11 @@ impl Config {
     /// An IPv6 literal already carries colons, so only treat a trailing
     /// ":<digits>" as an explicit port.
     fn with_port(host: &str, port: u16) -> String {
-        let has_port = host
-            .rsplit_once(':')
-            .is_some_and(|(head, tail)| {
-                !tail.is_empty()
-                    && tail.bytes().all(|b| b.is_ascii_digit())
-                    && (!head.contains(':') || head.ends_with(']'))
-            });
+        let has_port = host.rsplit_once(':').is_some_and(|(head, tail)| {
+            !tail.is_empty()
+                && tail.bytes().all(|b| b.is_ascii_digit())
+                && (!head.contains(':') || head.ends_with(']'))
+        });
         if has_port {
             host.to_string()
         } else {
@@ -121,7 +159,10 @@ impl Config {
             }
         }
         let dirs = ProjectDirs::from("com", "keyboard-it", "keyboard-it").ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "no OS config directory (HOME/APPDATA missing?)")
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no OS config directory (HOME/APPDATA missing?)",
+            )
         })?;
         Ok(dirs.config_dir().join("config.toml"))
     }
@@ -151,7 +192,10 @@ impl Config {
         }
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open").arg("-t").arg(&path).spawn()?;
+            std::process::Command::new("open")
+                .arg("-t")
+                .arg(&path)
+                .spawn()?;
         }
         #[cfg(target_os = "windows")]
         {
@@ -169,6 +213,10 @@ impl Config {
 
     /// Atomic write (write tmp, rename). Creates the config directory.
     pub fn save(&self) -> io::Result<()> {
+        let _lock = CONFIG_WRITE.lock().unwrap();
+        self.save_inner()
+    }
+    fn save_inner(&self) -> io::Result<()> {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -200,6 +248,7 @@ mod tests {
             peer_ip: "192.168.1.42".into(),
             role: Role::Sender,
             port: 5599,
+            ..Config::default()
         };
         let s = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
@@ -210,10 +259,14 @@ mod tests {
     fn old_config_without_peer_ip_still_loads() {
         // Files written before pairing existed have no peer_ip key; #[serde(default)]
         // must keep them loadable rather than turning into a fatal InvalidData.
-        let c: Config =
-            toml::from_str("shared_secret = \"k\"\npeer_host = \"h\"\nrole = \"sender\"\nport = 5599\n")
-                .unwrap();
+        let c: Config = toml::from_str(
+            "shared_secret = \"k\"\npeer_host = \"h\"\nrole = \"sender\"\nport = 5599\n",
+        )
+        .unwrap();
         assert_eq!(c.peer_ip, "");
+        assert!(c.desktop_mode && c.clipboard_enabled);
+        assert_eq!(c.desktop_port, 5601);
+        assert!(c.peer_device_id.is_empty());
         assert_eq!(c.peer_host, "h");
     }
 
@@ -230,7 +283,10 @@ mod tests {
 
     #[test]
     fn peer_addrs_dedupes_and_skips_empty() {
-        let one = Config { peer_host: "pc.local".into(), ..Config::default() };
+        let one = Config {
+            peer_host: "pc.local".into(),
+            ..Config::default()
+        };
         assert_eq!(one.peer_addrs(), vec!["pc.local:5599"]);
 
         let same = Config {
@@ -245,7 +301,11 @@ mod tests {
 
     #[test]
     fn explicit_port_wins_but_ipv6_literal_is_not_mistaken_for_one() {
-        let c = |h: &str| Config { peer_host: h.into(), port: 5599, ..Config::default() };
+        let c = |h: &str| Config {
+            peer_host: h.into(),
+            port: 5599,
+            ..Config::default()
+        };
         assert_eq!(c("pc.local:7000").peer_addr(), "pc.local:7000");
         assert_eq!(c("pc.local").peer_addr(), "pc.local:5599");
         // A bare IPv6 literal ends in a hex group, not a port.

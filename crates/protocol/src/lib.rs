@@ -10,6 +10,9 @@ pub mod secure;
 /// Persistent config: shared secret + peer host.
 pub mod config;
 
+/// Versioned encrypted remote desktop, independent of the legacy input protocol.
+pub mod desktop;
+
 /// One-click pairing: hands the shared secret to a new peer over an
 /// unauthenticated Noise_NN channel, confirmed by a 6-digit code.
 pub mod pairing;

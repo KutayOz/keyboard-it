@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventType, CallbackResult, EventField,
+    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, CallbackResult, EventField,
 };
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -70,7 +70,7 @@ const EVENT_QUEUE_CAP: usize = 128;
 pub static CONFIG_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// CGEventFlags mask that determines the down/up state of a modifier keycode.
-fn modifier_mask(kc: i64) -> Option<CGEventFlags> {
+pub(crate) fn modifier_mask(kc: i64) -> Option<CGEventFlags> {
     let m = match kc {
         0x37 | 0x36 => CGEventFlags::CGEventFlagCommand,
         0x38 | 0x3C => CGEventFlags::CGEventFlagShift,
@@ -117,8 +117,15 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // must not die silently when Windows is off or the config is empty.
     let mtm = MainThreadMarker::new()
         .expect("run() must be called on the main thread (AppKit requires it)");
-    let initial_conn =
-        if config_ready(&cfg) { ConnStatus::Connecting } else { ConnStatus::ConfigNeeded };
+    let initial_conn = if config_ready(&cfg) {
+        ConnStatus::Connecting
+    } else {
+        ConnStatus::ConfigNeeded
+    };
+    crate::desktop::start();
+    if cfg.is_complete() {
+        crate::discovery::start();
+    }
     let menu_bar = menubar::setup(mtm, false, initial_conn);
 
     // State flags: the tap callback and the connection thread (must be Send) write here;
@@ -141,6 +148,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // The settings window's status line mirrors the same connection state.
     crate::settings::set_conn_status_source(conn_status.clone());
     let flag_cb = active_flag.clone();
+    let conn_capture = conn_status.clone();
 
     println!("State: INACTIVE. Double-tap Fn to toggle.");
     println!("(Permissions: Input Monitoring + Accessibility. Prerequisite: fn key set to 'Do Nothing'.)");
@@ -166,8 +174,33 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
         // Re-read the config on EVERY attempt: an address/key changed via 'Settings...'
         // takes effect on the next attempt without a restart. Broken/missing file =
         // 'Setup needed'.
-        let cfg = protocol::config::Config::load().ok().flatten().unwrap_or_default();
-        let addrs = cfg.peer_addrs();
+        let cfg = protocol::config::Config::load()
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if cfg.desktop_mode || crate::desktop::shared().paused.load(Ordering::SeqCst) {
+            let snap = crate::desktop::shared().snapshot.lock().unwrap();
+            let status = if !config_ready(&cfg) {
+                ConnStatus::ConfigNeeded
+            } else if snap.connected {
+                ConnStatus::Connected
+            } else {
+                ConnStatus::Disconnected
+            };
+            conn_bg.store(status as u8, Ordering::Relaxed);
+            drop(snap);
+            for _ in rx.try_iter() {}
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let mut addrs = cfg.peer_addrs();
+        for p in crate::discovery::peers() {
+            if (!cfg.peer_device_id.is_empty() && p.device_id == cfg.peer_device_id)
+                || p.hostname == cfg.peer_host
+            {
+                addrs.insert(0, format!("{}:{}", p.host, p.port));
+            }
+        }
         let psk = match protocol::secure::psk_from_config_or_env(&cfg) {
             Ok(p) if !addrs.is_empty() => p,
             _ => {
@@ -326,22 +359,47 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                 let port = tap_port_cb.load(Ordering::Relaxed);
                 if port != 0 {
                     unsafe { CGEventTapEnable(port as *mut std::ffi::c_void, true) };
-                    eprintln!("warning: event tap had been disabled ({event_type:?}) — re-enabled.");
+                    eprintln!(
+                        "warning: event tap had been disabled ({event_type:?}) — re-enabled."
+                    );
                 } else {
                     eprintln!("warning: event tap disabled ({event_type:?}).");
                 }
                 return CallbackResult::Keep;
             }
 
+            if let Some(result) = crate::desktop::handle_event(event_type, event) {
+                let mut st = state.borrow_mut();
+                if st.active {
+                    st.active = false;
+                    st.held.clear();
+                    set_mouse_captured(false);
+                    flag_cb.store(false, Ordering::Relaxed);
+                }
+                return result;
+            }
             let kc = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
             let mut st = state.borrow_mut();
+            if conn_capture.load(Ordering::Relaxed) != ConnStatus::Connected as u8 {
+                if st.active {
+                    set_mouse_captured(false);
+                }
+                st.active = false;
+                st.held.clear();
+                st.last_fn_press = None;
+                flag_cb.store(false, Ordering::Relaxed);
+                return CallbackResult::Keep;
+            }
 
             // --- Fn key: double-tap toggle detection (always, regardless of state) ---
             if kc == FN_KEYCODE {
-                let now_down = event.get_flags().contains(CGEventFlags::CGEventFlagSecondaryFn);
+                let now_down = event
+                    .get_flags()
+                    .contains(CGEventFlags::CGEventFlagSecondaryFn);
                 if now_down && !st.fn_down {
                     // rising edge = one "tap"
-                    let is_double = matches!(st.last_fn_press, Some(t) if t.elapsed() <= DOUBLE_TAP);
+                    let is_double =
+                        matches!(st.last_fn_press, Some(t) if t.elapsed() <= DOUBLE_TAP);
                     if is_double {
                         st.last_fn_press = None;
                         st.active = !st.active;
@@ -350,7 +408,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                             println!(">>> ACTIVE — keyboard+mouse go to Windows (suppressed on the Mac).");
                         } else {
                             set_mouse_captured(false); // re-attach the Mac cursor
-                            // Returning to INACTIVE: release keys still held down on Windows.
+                                                       // Returning to INACTIVE: release keys still held down on Windows.
                             let held: Vec<u16> = st.held.drain().collect();
                             for hid in held {
                                 let _ = tx.try_send(InputEvent::Key(KeyEvent {
@@ -370,7 +428,11 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                 st.fn_down = now_down;
                 // Fn itself never goes to Windows (no HID usage). Consume while ACTIVE,
                 // pass through while INACTIVE.
-                return if st.active { CallbackResult::Drop } else { CallbackResult::Keep };
+                return if st.active {
+                    CallbackResult::Drop
+                } else {
+                    CallbackResult::Keep
+                };
             }
 
             // --- INACTIVE: let the Mac work normally; do not send, do not suppress ---
@@ -381,18 +443,27 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             // --- ACTIVE: translate + send + suppress ---
             match event_type {
                 CGEventType::KeyDown => {
-                    let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT);
+                    let repeat =
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT);
                     if repeat == 0 {
                         if let Some(hid) = mac_keycode_to_hid(kc) {
                             st.held.insert(hid);
-                            let _ = tx.try_send(InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }));
+                            let _ = tx.try_send(InputEvent::Key(KeyEvent {
+                                msg: MsgType::Down,
+                                hid_usage: hid,
+                                modifiers: 0,
+                            }));
                         }
                     }
                 }
                 CGEventType::KeyUp => {
                     if let Some(hid) = mac_keycode_to_hid(kc) {
                         st.held.remove(&hid);
-                        let _ = tx.try_send(InputEvent::Key(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }));
+                        let _ = tx.try_send(InputEvent::Key(KeyEvent {
+                            msg: MsgType::Up,
+                            hid_usage: hid,
+                            modifiers: 0,
+                        }));
                     }
                 }
                 CGEventType::FlagsChanged => {
@@ -403,10 +474,20 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                         // Windows toggles exactly once. Not tracked in `held` (released
                         // immediately).
                         if let Some(hid) = mac_keycode_to_hid(kc) {
-                            let _ = tx.try_send(InputEvent::Key(KeyEvent { msg: MsgType::Down, hid_usage: hid, modifiers: 0 }));
-                            let _ = tx.try_send(InputEvent::Key(KeyEvent { msg: MsgType::Up, hid_usage: hid, modifiers: 0 }));
+                            let _ = tx.try_send(InputEvent::Key(KeyEvent {
+                                msg: MsgType::Down,
+                                hid_usage: hid,
+                                modifiers: 0,
+                            }));
+                            let _ = tx.try_send(InputEvent::Key(KeyEvent {
+                                msg: MsgType::Up,
+                                hid_usage: hid,
+                                modifiers: 0,
+                            }));
                         }
-                    } else if let (Some(hid), Some(mask)) = (mac_keycode_to_hid(kc), modifier_mask(kc)) {
+                    } else if let (Some(hid), Some(mask)) =
+                        (mac_keycode_to_hid(kc), modifier_mask(kc))
+                    {
                         let down = event.get_flags().contains(mask);
                         if down {
                             st.held.insert(hid);
@@ -414,7 +495,11 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                             st.held.remove(&hid);
                         }
                         let msg = if down { MsgType::Down } else { MsgType::Up };
-                        let _ = tx.try_send(InputEvent::Key(KeyEvent { msg, hid_usage: hid, modifiers: 0 }));
+                        let _ = tx.try_send(InputEvent::Key(KeyEvent {
+                            msg,
+                            hid_usage: hid,
+                            modifiers: 0,
+                        }));
                     }
                 }
 
@@ -434,16 +519,28 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
 
                 // --- mouse: left/right buttons (dedicated event types) ---
                 CGEventType::LeftMouseDown => {
-                    let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::LEFT, down: true });
+                    let _ = tx.try_send(InputEvent::MouseButton {
+                        button: mousebtn::LEFT,
+                        down: true,
+                    });
                 }
                 CGEventType::LeftMouseUp => {
-                    let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::LEFT, down: false });
+                    let _ = tx.try_send(InputEvent::MouseButton {
+                        button: mousebtn::LEFT,
+                        down: false,
+                    });
                 }
                 CGEventType::RightMouseDown => {
-                    let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::RIGHT, down: true });
+                    let _ = tx.try_send(InputEvent::MouseButton {
+                        button: mousebtn::RIGHT,
+                        down: true,
+                    });
                 }
                 CGEventType::RightMouseUp => {
-                    let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::RIGHT, down: false });
+                    let _ = tx.try_send(InputEvent::MouseButton {
+                        button: mousebtn::RIGHT,
+                        down: false,
+                    });
                 }
 
                 // --- mouse: other buttons (middle = number 2; extras skipped for now) ---
@@ -451,14 +548,19 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     let num = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
                     let down = matches!(event_type, CGEventType::OtherMouseDown);
                     if num == 2 {
-                        let _ = tx.try_send(InputEvent::MouseButton { button: mousebtn::MIDDLE, down });
+                        let _ = tx.try_send(InputEvent::MouseButton {
+                            button: mousebtn::MIDDLE,
+                            down,
+                        });
                     }
                 }
 
                 // --- mouse: scroll. Axis1=vertical, Axis2=horizontal (integer ticks). ---
                 CGEventType::ScrollWheel => {
-                    let v = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
-                    let h = event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
+                    let v =
+                        event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
+                    let h =
+                        event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
                     let dy = v.clamp(i8::MIN as i64, i8::MAX as i64) as i8;
                     let dx = h.clamp(i8::MIN as i64, i8::MAX as i64) as i8;
                     if dx != 0 || dy != 0 {
@@ -484,7 +586,10 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
                 }
                 // Hand the port to the callback (TapDisabled* recovery).
-                tap_port.store(tap.mach_port().as_concrete_TypeRef() as usize, Ordering::Relaxed);
+                tap_port.store(
+                    tap.mach_port().as_concrete_TypeRef() as usize,
+                    Ordering::Relaxed,
+                );
                 tap.enable();
                 println!("ready. Double-tap Fn → ACTIVE; double-tap again → INACTIVE. (Quit via the menu bar.)");
                 Some(tap)
