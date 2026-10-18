@@ -180,7 +180,12 @@ impl Viewer {
             && s.desktop_mode.load(Ordering::SeqCst)
             && !s.paused.load(Ordering::SeqCst);
         if active != iv.last_active.replace(active) {
-            iv.clipboard.borrow_mut().reset(read_clipboard());
+            // Remember the clipboard on departure. A NEW copy made in a Mac
+            // app while this Space is inactive is sent after returning (never
+            // while inactive). Reconnects reset the baseline separately below.
+            if !active {
+                iv.clipboard.borrow_mut().reset(read_clipboard());
+            }
             s.snapshot.lock().unwrap().received_clipboard = None;
             set_visible(active);
             if !active {
@@ -189,7 +194,9 @@ impl Viewer {
         }
         let epoch = s.snapshot.lock().unwrap().epoch;
         let share = s.clipboard.load(Ordering::SeqCst);
-        if iv.last_connection.replace(epoch) != epoch || iv.last_clipboard.replace(share) != share {
+        let connection_changed = iv.last_connection.replace(epoch) != epoch;
+        let sharing_changed = iv.last_clipboard.replace(share) != share;
+        if connection_changed || sharing_changed {
             iv.clipboard.borrow_mut().reset(read_clipboard());
             s.snapshot.lock().unwrap().received_clipboard = None;
             iv.last_frame.set(None);

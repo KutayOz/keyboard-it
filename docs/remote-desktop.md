@@ -61,7 +61,9 @@ is required because the captured screen is on Windows.
   and reconnects if no decoded frame arrives for three seconds while viewing. Receiver socket
   closure/timeout also releases held inputs. The bounded input queue fails closed on overflow;
   input/control preempt outgoing clipboard fragments.
-- Clipboard synchronization baselines are reset on focus, connection and sharing changes.
+- Clipboard synchronization baselines are reset on focus loss, connection and sharing changes.
+  New Mac text copied while the Space is inactive is shared only after returning to it;
+  reconnecting still discards pending old clipboard content.
   Remote transfer IDs and content tracking suppress echoes. Local clipboard text is never
   replayed merely because a connection was re-established. Text is UTF-8 on the wire,
   Unicode text on Windows and a native string on macOS; limit 1 MiB, no NUL characters.
