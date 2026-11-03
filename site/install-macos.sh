@@ -8,7 +8,7 @@ set -eu
 # Manual download page (shown in error messages).
 BASE_URL="https://kutayoz.github.io/keyboard-it"
 
-VERSION="0.6.2"
+VERSION="0.7.0"
 RELEASE_URL="https://github.com/KutayOz/keyboard-it/releases/download/v$VERSION"
 DMG_URL="$RELEASE_URL/keyboard-it-macos.dmg"
 APP_NAME="keyboard-it.app"

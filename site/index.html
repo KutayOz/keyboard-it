@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>keyboard-it &#8212; Download</title>
-<meta name="description" content="keyboard-it — encrypted Windows remote desktop and keyboard/mouse control from your Mac, with paired devices and Android via ADB/scrcpy.">
+<meta name="description" content="keyboard-it — encrypted Windows remote desktop and keyboard/mouse control from your Mac or Android, with paired devices and direct LAN sessions.">
 <link rel="icon" type="image/png" href="keyboard-it.png">
 <style>
   *, *::before, *::after { box-sizing: border-box; }
@@ -124,7 +124,7 @@
 
   /* Download */
   .download { padding: 40px 24px 44px; background: #ECE9D8; }
-  .dl-wrap { max-width: 660px; margin: 0 auto; }
+  .dl-wrap { max-width: 840px; margin: 0 auto; }
   .dl-box {
     border: 1px solid #b7b29a;
     border-top-color: #d8d3bd;
@@ -138,10 +138,10 @@
   .dl-grid { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; }
   .dl-btn {
     text-decoration: none;
-    flex: 1 1 250px;
-    min-width: 240px;
+    flex: 1 1 230px;
+    min-width: 210px;
     display: block;
-    padding: 18px 20px;
+    padding: 18px 16px;
     text-align: center;
     border: 1px solid #2f5fb0;
     border-radius: 5px;
@@ -155,6 +155,14 @@
   }
   .dl-btn:active { transform: translateY(1px); box-shadow: 0 1px 2px rgba(10,36,106,.3) inset; }
   .dl-apple { font-size: 26px; line-height: 1; margin-bottom: 8px; color: #0A246A; }
+  .dl-droid {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 26px;
+    margin-bottom: 8px;
+    color: #2e7d32;
+  }
   .dl-winlogo { display: flex; justify-content: center; margin-bottom: 8px; }
   .win-grid {
     display: inline-grid;
@@ -282,6 +290,22 @@
     inset: 4px;
     border-radius: 2px;
     background: linear-gradient(180deg, #bfe0ff, #7fb2f0);
+  }
+  .art-droid {
+    width: 28px;
+    height: 40px;
+    margin: 0 auto 10px;
+    border: 2px solid #5a6678;
+    border-radius: 6px;
+    background: linear-gradient(180deg, #34a853, #1e7e34);
+    position: relative;
+  }
+  .art-droid::before {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border-radius: 3px;
+    background: linear-gradient(180deg, #d4f8db, #9be4a8);
   }
   .node-title { font-size: 13px; font-weight: bold; color: #202020; }
   .node-sub { font-size: 10px; color: #6a6a60; margin-top: 3px; }
@@ -424,15 +448,15 @@
   <section class="hero">
     <img class="hero-icon reveal" src="keyboard-it.png" alt="keyboard-it">
     <h1 class="reveal">keyboard&#8209;it</h1>
-    <p class="tagline reveal">Your Windows desktop, controlled from your Mac.</p>
-    <p class="hero-sub reveal">Encrypted screen, keyboard, mouse and text clipboard over your LAN.
+    <p class="tagline reveal">Your Windows PC and Mac, controlled across your devices.</p>
+    <p class="hero-sub reveal">Encrypted screen, keyboard, mouse and Unicode text over your LAN.
       Same network, no cloud account.</p>
   </section>
 
   <section class="download">
     <div class="dl-wrap reveal">
       <fieldset class="dl-box">
-        <legend>Download &#8212; v0.6.2</legend>
+        <legend>Download &#8212; v0.7.0</legend>
 
         <div class="dl-grid">
           <!-- Fixed-name assets are published by the release workflow (see site/README.md). -->
@@ -450,27 +474,39 @@
             <div class="dl-name">Download for Windows</div>
             <div class="dl-meta">.msi &#183; x64</div>
           </a>
+          <a class="dl-btn"
+             href="https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-android.apk"
+             download>
+            <div class="dl-droid">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M17.523 15.3414c-.5511 0-.9993-.4486-.9993-1.0002s.4482-.9998.9993-.9998c.5516 0 .9997.4482.9997.9998 0 .5516-.4481 1.0002-.9997 1.0002m-11.046 0c-.5511 0-.9993-.4486-.9993-1.0002s.4482-.9998.9993-.9998c.5516 0 .9998.4482.9998.9998 0 .5516-.4482 1.0002-.9998 1.0002m11.4045-6.02l1.9973-3.4592a.416.416 0 00-.1521-.5676.416.416 0 00-.5676.1521l-2.0223 3.503C15.5802 8.4116 13.8427 8.0965 12 8.0965s-3.5802.3151-5.1368.8532L4.8409 5.4467a.4161.4161 0 00-.5676-.1521.4157.4157 0 00-.1521.5676l1.9973 3.4592C2.6889 11.1867.3432 14.6589 0 18.761h24c-.3432-4.1021-2.6889-7.5743-6.1185-9.4396"/>
+              </svg>
+            </div>
+            <div class="dl-name">Download for Android</div>
+            <div class="dl-meta">.apk &#183; ARM64 / x86_64</div>
+          </a>
         </div>
 
-        <p class="step-text">Install v0.6.2 on both computers for new pairings. Saved pairing keys are preserved.
-          <a href="https://github.com/KutayOz/keyboard-it/releases/tag/v0.6.2">Release notes</a> &#183;
-          <a href="https://github.com/KutayOz/keyboard-it/releases/download/v0.6.2/SHA256SUMS">SHA-256 checksums</a> &#183;
+        <p class="step-text">Install v0.7.0 on your computers and mobile devices. Saved pairing keys are preserved.
+          <a href="https://github.com/KutayOz/keyboard-it/releases/tag/v0.7.0">Release notes</a> &#183;
+          <a href="https://github.com/KutayOz/keyboard-it/releases/download/v0.7.0/SHA256SUMS">SHA-256 checksums</a> &#183;
+          <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/android-controller.md">Android controller guide</a> &#183;
           <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/security-review.md">Security review</a></p>
 
         <div class="note">
           <span class="note-badge">!</span>
           <div class="note-text">
-            <strong>Unsigned build.</strong> macOS: open the app once, dismiss the warning, then
+            <strong>Unsigned / self-signed builds.</strong> macOS: open the app once, dismiss the warning, then
             System&#160;Settings &#8594; <em>Privacy &amp; Security</em> &#8594; scroll down to
             &#8220;keyboard&#8209;it was blocked&#8221; &#8594; <em>Open Anyway</em> &#8594; open it
-            again. (macOS&#160;14 and earlier: right&#8209;click the app &#8594; <em>Open</em>.)
-            Windows: on the SmartScreen prompt, click <em>More info</em> &#8594; <em>Run anyway</em>.
+            again. Windows: on the SmartScreen prompt, click <em>More info</em> &#8594; <em>Run anyway</em>.
+            Android: allow APK installation from your browser or file manager when prompted.
           </div>
         </div>
 
         <!-- Piped install never sets the quarantine attribute (see site/install-macos.sh). -->
         <div class="term reveal">
-          <div class="term-title">Alternative: one Terminal command</div>
+          <div class="term-title">Alternative for Mac: one Terminal command</div>
           <code class="term-cmd">curl -fsSL https://kutayoz.github.io/keyboard-it/install-macos.sh | sh</code>
           <div class="term-hint">Downloads a pinned release and verifies its SHA-256 checksum before installation. The app remains unsigned.</div>
         </div>
@@ -484,8 +520,8 @@
     <div class="diagram reveal">
       <div class="node">
         <div class="art-mac"></div>
-        <div class="node-title">Mac controller</div>
-        <div class="node-sub">screen + input viewer</div>
+        <div class="node-title">Mac</div>
+        <div class="node-sub">controller &amp; input host</div>
       </div>
       <div class="link">
         <div class="lock">&#128274;</div>
@@ -495,7 +531,17 @@
       <div class="node">
         <div class="art-win"></div>
         <div class="node-title">Windows PC</div>
-        <div class="node-sub">existing desktop session</div>
+        <div class="node-sub">desktop &amp; input host</div>
+      </div>
+      <div class="link">
+        <div class="lock">&#128274;</div>
+        <div class="link-label">encrypted&#160;LAN</div>
+        <div class="wire"></div>
+      </div>
+      <div class="node">
+        <div class="art-droid"></div>
+        <div class="node-title">Android</div>
+        <div class="node-sub">touch, screen &amp; typing</div>
       </div>
     </div>
 
@@ -507,13 +553,23 @@
       </div>
       <div class="feature">
         <span class="dot dot-blue"></span>
-        <div class="feature-text"><strong>Windows remote desktop.</strong> Open the PC screen in a native Mac window or full-screen Space.
+        <div class="feature-text"><strong>Windows remote desktop.</strong> Open the PC screen on Mac or Android.
           Windows must be awake, signed in and have an active monitor.</div>
+      </div>
+      <div class="feature">
+        <span class="dot dot-green"></span>
+        <div class="feature-text"><strong>Android mobile controller.</strong> Native ARM64/x86_64 app for Android 8.0+.
+          Touch mouse, hold-to-right-click, 2-finger scroll, physical keyboard and direct Unicode text typing.</div>
+      </div>
+      <div class="feature">
+        <span class="dot dot-blue"></span>
+        <div class="feature-text"><strong>Control your Mac from phone.</strong> Native trackpad and typing control from Android
+          into macOS with zero screen overhead.</div>
       </div>
       <div class="feature">
         <span class="dot dot-blue"></span>
         <div class="feature-text"><strong>Paired devices.</strong> Save multiple computers, choose the active device and revoke
-          individual controllers from Windows settings.</div>
+          individual controllers from Windows and Mac host settings.</div>
       </div>
       <div class="feature">
         <span class="dot dot-green"></span>
@@ -521,8 +577,9 @@
           in keyboard/mouse-only mode.</div>
       </div>
     </div>
-    <p class="step-text"><strong>Android:</strong> add a phone from <em>Cihazlarım… → Android Ekle…</em>.
-      Requires separately installed ADB and scrcpy; use USB or Android 11+ Wireless debugging for encrypted Wi-Fi.
+    <p class="step-text"><strong>Android controller:</strong> install the APK on your Android 8.0+ device to control your PC or Mac.
+      <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/android-controller.md">Android controller guide</a>.
+      For previous Mac → Android control via ADB/scrcpy, see
       <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/android.md">Android setup and validation limits</a>.
       macOS/Linux input-only hosts are available from source;
       <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/universal-devices.md">host setup</a>.</p>
@@ -534,7 +591,7 @@
     <div class="wizard reveal">
       <aside class="wizard-banner">
         <div class="wizard-name">keyboard&#8209;it Setup Wizard</div>
-        <div class="wizard-sub">Follow the steps to pair your two machines.</div>
+        <div class="wizard-sub">Follow the steps to pair your devices.</div>
         <img class="wizard-icon" src="keyboard-it.png" alt="">
       </aside>
 
@@ -542,34 +599,34 @@
         <li class="step">
           <span class="step-num">1</span>
           <div>
-            <div class="step-title">Install on both machines</div>
-            <div class="step-text">Run the .dmg on your Mac and the .msi on your Windows PC.</div>
+            <div class="step-title">Install on your devices</div>
+            <div class="step-text">Run the .dmg on Mac, the .msi on Windows, or the .apk on Android.</div>
           </div>
         </li>
         <li class="step">
           <span class="step-num">2</span>
           <div>
             <div class="step-title">Pair them</div>
-            <div class="step-text">Pick your PC from the list on the Mac and click
-              <em>Pair &amp; Connect</em>. Compare <strong>all eight fingerprint groups</strong> on both screens,
-              then click <em>Allow</em> on Windows only if every group matches. Both devices must be on the same LAN;
+            <div class="step-text">Pick your host device from the list and click
+              <em>Pair &amp; Connect</em> (or <em>Eşleştir</em>). Compare <strong>all eight fingerprint groups</strong> on both screens,
+              then click <em>Allow</em> only if every group matches. All devices must be on the same LAN;
               guest Wi-Fi/client isolation can prevent discovery.</div>
           </div>
         </li>
         <li class="step">
           <span class="step-num">3</span>
           <div>
-            <div class="step-title">Grant permissions (macOS)</div>
-            <div class="step-text">Enable <em>Accessibility</em> and <em>Input Monitoring</em> in
-              System Settings.</div>
+            <div class="step-title">Grant permissions</div>
+            <div class="step-text">macOS: enable <em>Accessibility</em> and <em>Input Monitoring</em> in
+              System Settings. Android: allow installation from unknown sources for your browser/installer.</div>
           </div>
         </li>
         <li class="step">
           <span class="step-num done">4</span>
           <div>
-            <div class="step-title">Open the screen</div>
-            <div class="step-text">Choose <em>Ekranı Aç</em> on the Mac. While the viewer is focused, input goes to Windows;
-              switch Spaces or apps to return to the Mac. For input-only control, enable
+            <div class="step-title">Open the screen &amp; control</div>
+            <div class="step-text">On Mac, choose <em>Ekranı Aç</em>. On Android, tap <em>Bağlan</em> to open the desktop or touch trackpad.
+              While focused, input goes to the remote host. For Mac input-only control, enable
               <em>Yalnız klavye/fare modu</em> and double&#8209;tap <span class="mono">Fn</span>.</div>
           </div>
         </li>

@@ -15,8 +15,10 @@ Standalone static site with download links and install instructions.
   both the image and checksum manifest to its `VERSION` to avoid a release-update race:
   - `keyboard-it-macos.dmg`
   - `keyboard-it-windows-x64.msi`
-  The release job in `.github/workflows/build.yml` uploads these fixed-name copies on every
-  `v*` tag, next to the versioned filenames (`keyboard-it-0.1.0.dmg` etc.) kept for archival.
+  - `keyboard-it-android.apk`
+  The release job in `.github/workflows/build.yml` uploads fixed-name copies on every
+  `v*` tag, next to the versioned filenames kept for archival. The stable-key signed Android APK
+  is published via `packaging/android/publish-apk.py vX.Y.Z` after native CI completes.
 
 ## Contents
 
