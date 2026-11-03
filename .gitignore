@@ -30,3 +30,12 @@ __pycache__/
 
 # wrangler local cache (deploy tool; kept out of the repo)
 .wrangler/
+
+# Android build outputs and private distribution signing keys
+android/.gradle/
+android/local.properties
+android/app/build/
+android/app/src/main/jniLibs/
+.android-signing/
+
+android/build/

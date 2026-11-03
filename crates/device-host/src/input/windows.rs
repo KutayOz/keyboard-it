@@ -108,6 +108,16 @@ impl super::InputBackend for Windows {
     fn platform(&self) -> protocol::devices::Platform {
         protocol::devices::Platform::Windows
     }
+    fn supports_text(&self) -> bool {
+        true
+    }
+    fn text(&mut self, text: &str) -> io::Result<()> {
+        let inputs = unicode_inputs(text);
+        if unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize != inputs.len() {
+            return Err(io::Error::other("Unicode input blocked by Windows"));
+        }
+        Ok(())
+    }
     fn event(&mut self, event: InputEvent) -> io::Result<()> {
         match event {
             InputEvent::Key(k) => {
@@ -120,5 +130,51 @@ impl super::InputBackend for Windows {
             InputEvent::Scroll { dx, dy } => scroll(dx, dy),
         }
         Ok(())
+    }
+}
+
+fn unicode_inputs(text: &str) -> Vec<INPUT> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_UNICODE;
+    text.encode_utf16()
+        .flat_map(|unit| {
+            [false, true].map(|up| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(0),
+                        wScan: unit,
+                        dwFlags: if up {
+                            KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                        } else {
+                            KEYEVENTF_UNICODE
+                        },
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            })
+        })
+        .collect()
+}
+#[cfg(test)]
+mod unicode_tests {
+    use super::*;
+    #[test]
+    fn unicode_packets_include_turkish_and_surrogate_pairs_with_balanced_keyups() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_UNICODE;
+        let input = unicode_inputs("İ👋");
+        assert_eq!(input.len(), 6);
+        for (pair, unit) in input.chunks_exact(2).zip("İ👋".encode_utf16()) {
+            unsafe {
+                assert_eq!(pair[0].Anonymous.ki.wScan, unit);
+                assert_eq!(pair[1].Anonymous.ki.wScan, unit);
+                assert_eq!(pair[0].Anonymous.ki.wVk.0, 0);
+                assert_eq!(pair[0].Anonymous.ki.dwFlags, KEYEVENTF_UNICODE);
+                assert_eq!(
+                    pair[1].Anonymous.ki.dwFlags,
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                );
+            }
+        }
     }
 }

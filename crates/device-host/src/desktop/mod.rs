@@ -149,7 +149,9 @@ fn host_capabilities() -> Capabilities {
     #[cfg(windows)]
     {
         let mut caps = Capabilities::host(protocol::devices::Platform::Windows);
-        caps.receive_input = crate::inject::capabilities().receive_input;
+        let input = crate::inject::capabilities();
+        caps.receive_input = input.receive_input;
+        caps.text_input = input.text_input;
         caps
     }
     #[cfg(not(windows))]
@@ -241,6 +243,9 @@ fn run(
                         break;
                     }
                 }
+                Message::TextInput(text) if a.visible && a.ready && negotiated.text_input => {
+                    if !reader_lease.dispatch(|| crate::inject::text(a.owner, &text)).unwrap_or(Ok(false)).unwrap_or(false) { break; }
+                }
                 Message::Absolute { x, y } if a.visible && a.ready && negotiated.input => {
                     if let Some(d) = &a.display {
                         if reader_lease
@@ -256,7 +261,7 @@ fn run(
                         break;
                     }
                 }
-                Message::Input(_) | Message::Absolute { .. } | Message::Clipboard { .. } => {}
+                Message::Input(_) | Message::TextInput(_) | Message::Absolute { .. } | Message::Clipboard { .. } => {}
                 _ => break,
             }
         }
@@ -545,14 +550,31 @@ fn run(
 fn run(
     mut channel: Channel,
     stop: &AtomicBool,
-    _owner: u64,
-    _lease: Arc<protocol::access::SessionLease>,
+    owner: u64,
+    lease: Arc<protocol::access::SessionLease>,
 ) -> io::Result<()> {
     channel.writer.send(&Message::Status(
-        "Bu adaptör ekran veya pano paylaşmıyor. Klavye/fare modu için çift Fn kullanın.".into(),
+        "Bu cihaz yalnız klavye/fare alıcısıdır; ekran ve pano aktarımı yok.".into(),
     ))?;
-    while !stop.load(Ordering::SeqCst) {
-        channel.reader.recv()?;
+    let mut active = false;
+    while !stop.load(Ordering::SeqCst) && crate::inject::owned(owner) {
+        match channel.reader.recv()? {
+            Message::Active {visible, ..} => {
+                active = visible;
+                if !active { crate::inject::release(owner); }
+            }
+            Message::Input(event) if active && channel.negotiated.input => {
+                if !lease.dispatch(|| crate::inject::event(owner, event))? { break; }
+            }
+            Message::TextInput(text) if active && channel.negotiated.text_input => {
+                if !lease.dispatch(|| crate::inject::text(owner, &text))?? { break; }
+            }
+            Message::Input(_) | Message::TextInput(_) => {},
+            Message::ReleaseAll => crate::inject::release(owner),
+            Message::Heartbeat => {},
+            Message::Ping(id) => channel.writer.send(&Message::Pong(id))?,
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported input-only record")),
+        }
         channel.writer.send(&Message::Heartbeat)?;
     }
     Ok(())
@@ -561,6 +583,41 @@ fn run(
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
+    #[test]
+    fn mobile_input_only_session_dispatches_and_revocation_releases_the_backend() {
+        use std::time::Instant;
+        use protocol::{InputEvent, KeyEvent, MsgType};
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl crate::input::InputBackend for Recording {
+            fn platform(&self) -> protocol::devices::Platform { protocol::devices::Platform::Macos }
+            fn event(&mut self, event: InputEvent) -> io::Result<()> {self.0.lock().unwrap().push(format!("{event:?}"));Ok(())}
+            fn supports_text(&self) -> bool {true}
+            fn text(&mut self, text: &str) -> io::Result<()> {self.0.lock().unwrap().push(text.into());Ok(())}
+        }
+        let _guard=crate::inject::TEST_CONTROLLER.lock().unwrap();
+        crate::inject::disconnect();
+        let records=Arc::new(Mutex::new(Vec::new()));
+        crate::inject::set_backend(Box::new(Recording(records.clone()))).unwrap();
+        let access=AccessStore::in_memory("");let secret=access.grant("Android","android-id").unwrap();
+        let cfg=Config{desktop_port:0,device_id:"mac-id".into(),..Default::default()};
+        let host=start_with_access(&cfg,access.clone(),Arc::new(|_|{})).unwrap();
+        let target=controller_client::Target{name:"Mac".into(),host:"127.0.0.1".into(),port:5599,desktop_port:host.port,device_id:"mac-id".into(),secret};
+        let session=controller_client::Session::connect(&target,"android-id").unwrap();
+        session.input(InputEvent::Key(KeyEvent{msg:MsgType::Down,hid_usage:4,modifiers:0})).unwrap();
+        session.text("Türkçe 👋").unwrap();
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while !records.lock().unwrap().iter().any(|s|s=="Türkçe 👋") {
+            assert!(Instant::now()<deadline,"input-only host did not dispatch");thread::sleep(Duration::from_millis(5));
+        }
+        assert!(records.lock().unwrap().iter().any(|s|s.contains("Up")),"text must release held shortcut keys");
+        access.revoke_all().unwrap();
+        let count=records.lock().unwrap().len();
+        let _=session.input(InputEvent::MouseMove{dx:123,dy:456});
+        thread::sleep(Duration::from_millis(30));assert_eq!(records.lock().unwrap().len(),count);
+        session.close();drop(session);drop(host);crate::inject::disconnect();
+        crate::inject::set_backend(Box::new(crate::input::DryRun)).unwrap();
+    }
+
     #[test]
     fn revocation_and_identity_binding_cannot_displace_another_authenticated_controller() {
         let _guard = crate::inject::TEST_CONTROLLER.lock().unwrap();

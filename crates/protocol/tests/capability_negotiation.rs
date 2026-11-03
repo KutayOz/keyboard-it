@@ -32,7 +32,8 @@ fn authenticated_endpoints_negotiate_view_only_without_clipboard() {
             SessionCapabilities {
                 screen: true,
                 input: false,
-                clipboard: false
+                clipboard: false,
+                text_input: false
             }
         );
         channel.writer.send(&Message::Heartbeat).unwrap();
@@ -104,7 +105,8 @@ fn unsupported_codec_disables_the_desktop_and_unknown_capability_bits_are_ignore
         SessionCapabilities {
             screen: false,
             input: false,
-            clipboard: false
+            clipboard: false,
+            text_input: false
         }
     );
     let mut encoded = controller.encode();

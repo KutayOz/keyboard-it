@@ -177,15 +177,16 @@ AppKit flow over USB. The user confirmed live video and mouse control in the man
 window. The device manager now also provides an **Ekranı Aç** button for the active
 device with screen permission. Wi-Fi pairing, keyboard behavior and other OEMs remain
 physically unvalidated.
-Android uses an external tool window; direct native Android video and an Android controller
-app are still future work.
+Mac → Android still uses an external tool window. Version 0.7.0 adds a separate native
+Android controller APK for Windows screen/input and Mac input-only control; see
+[Android controller](android-controller.md). Native Mac → Android video remains future work.
 
 ## Remaining steps
 
 1. macOS/Linux screen and clipboard backends, Wayland portal support, and Windows/Linux
    controller applications. Keep capability reports limited to implemented operations.
-2. Home Assistant adapters and explicitly supported TV backends; an Android controller
-   and direct Android video backend. iOS controller/screen-sharing and full input control
+2. Home Assistant adapters and explicitly supported TV backends; a direct Mac → Android
+   video backend. iOS controller/screen-sharing and full input control
    need separate capability work.
 3. An authenticated controller API and mobile/web clients, followed by explicit
    multi-device actions. Screen streams remain peer-to-peer.

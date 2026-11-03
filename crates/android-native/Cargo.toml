@@ -1,0 +1,15 @@
+[package]
+name = "android-native"
+version.workspace = true
+edition = "2021"
+description = "JNI bridge to the shared Rust mobile controller"
+
+[lib]
+name = "keyboard_it_mobile"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+controller-client = { path = "../controller-client" }
+protocol = { path = "../protocol" }
+jni = "0.21"
+serde_json = "1"

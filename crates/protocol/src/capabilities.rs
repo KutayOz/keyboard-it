@@ -12,6 +12,7 @@ pub struct Capabilities {
     pub send_input: bool,
     pub receive_input: bool,
     pub clipboard: bool,
+    pub text_input: bool,
     pub decode_h264: bool,
     pub encode_h264: bool,
 }
@@ -23,6 +24,7 @@ impl Capabilities {
             view_screen: true,
             send_input: true,
             clipboard: true,
+            text_input: true,
             decode_h264: true,
             ..Default::default()
         }
@@ -33,6 +35,7 @@ impl Capabilities {
             capture_screen: true,
             receive_input: true,
             clipboard: true,
+            text_input: true,
             encode_h264: true,
             ..Default::default()
         }
@@ -56,6 +59,7 @@ impl Capabilities {
             self.clipboard,
             self.decode_h264,
             self.encode_h264,
+            self.text_input,
         ]
         .iter()
         .enumerate()
@@ -91,6 +95,7 @@ impl Capabilities {
             clipboard: enabled(4),
             decode_h264: enabled(5),
             encode_h264: enabled(6),
+            text_input: enabled(7),
         })
     }
 }
@@ -100,6 +105,7 @@ pub struct SessionCapabilities {
     pub screen: bool,
     pub input: bool,
     pub clipboard: bool,
+    pub text_input: bool,
 }
 impl SessionCapabilities {
     /// Desktop v2 without the optional exchange retains its original behavior.
@@ -107,16 +113,21 @@ impl SessionCapabilities {
         screen: true,
         input: true,
         clipboard: true,
+        text_input: false,
     };
     pub fn negotiate(controller: &Capabilities, host: &Capabilities) -> Self {
         let screen = controller.view_screen
             && host.capture_screen
             && controller.decode_h264
             && host.encode_h264;
+        // Explicitly screenless hosts can accept touchpad input; an advertised
+        // screen with an unsupported codec must still fail closed for input.
+        let input = (screen || !host.capture_screen) && controller.send_input && host.receive_input;
         Self {
             screen,
-            input: screen && controller.send_input && host.receive_input,
+            input,
             clipboard: screen && controller.clipboard && host.clipboard,
+            text_input: input && controller.text_input && host.text_input,
         }
     }
 }

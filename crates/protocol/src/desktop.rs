@@ -54,6 +54,8 @@ pub enum Message {
         clipboard: bool,
     },
     Input(crate::InputEvent),
+    /// Negotiated Unicode text; never sent to older peers.
+    TextInput(String),
     Absolute {
         x: u16,
         y: u16,
@@ -120,6 +122,10 @@ impl Message {
                 b.push(3);
                 let (v, n) = e.encode();
                 b.extend(&v[..n]);
+            }
+            Self::TextInput(text) => {
+                if text.is_empty() || text.len() > 4096 || text.contains('\0') {return Err(invalid("Invalid text input"));}
+                b.push(15); b.extend(text.as_bytes());
             }
             Self::Absolute { x, y } => {
                 b.push(4);
@@ -237,6 +243,8 @@ impl Message {
                 x: u16::from_be_bytes(p[..2].try_into().unwrap()),
                 y: u16::from_be_bytes(p[2..].try_into().unwrap()),
             },
+            15 if !p.is_empty() && p.len() <= 4096 && !p.contains(&0) => Self::TextInput(
+                String::from_utf8(p.to_vec()).map_err(|_| invalid("Invalid text input UTF-8"))?),
             5 if p.is_empty() => Self::ReleaseAll,
             6 if p.len() > 17 && p[16] <= 1 => {
                 chunk_bounds(u32_at(8), u32_at(12), p.len() - 17, MAX_VIDEO)?;

@@ -405,6 +405,9 @@ pub fn run(cfg: protocol::config::Config, open_devices: bool) -> io::Result<()> 
             CGEventType::ScrollWheel,
         ],
         move |_proxy, event_type, event: &CGEvent| -> CallbackResult {
+            if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == protocol::INJECTED_EVENT_TAG {
+                return CallbackResult::Keep;
+            }
             {
                 let mut st = state.borrow_mut();
                 let epoch = INPUT_EPOCH.load(Ordering::SeqCst);

@@ -43,6 +43,7 @@ pub fn capabilities() -> protocol::capabilities::Capabilities {
     protocol::capabilities::Capabilities {
         platform: c.backend.platform(),
         receive_input: c.backend.available(),
+        text_input: c.backend.available() && c.backend.supports_text(),
         ..Default::default()
     }
 }
@@ -134,6 +135,17 @@ pub fn event(owner: u64, ev: InputEvent) -> bool {
         _ => {}
     }
     true
+}
+pub fn text(owner: u64, text: &str) -> io::Result<bool> {
+    if text.is_empty() || text.len() > 4096 || text.contains('\0') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid text input"));
+    }
+    let mut c = controller().lock().unwrap();
+    if !c.live || c.generation != owner { return Ok(false); }
+    // Text commits never inherit held shortcut modifiers from a prior gesture.
+    c.release();
+    c.backend.text(text)?;
+    Ok(true)
 }
 #[cfg(windows)]
 pub fn absolute(owner: u64, x: u16, y: u16, d: &protocol::desktop::Display) {

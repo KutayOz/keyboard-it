@@ -398,6 +398,11 @@ pub fn reset_target() {
     });
 }
 pub fn open(mtm: MainThreadMarker) {
+    if crate::host::running() {
+        crate::menubar::show_alert(mtm, "Mac alıcısı etkin", "Önce Mac alıcısını kapatın.");
+        return;
+    }
+
     let cfg = protocol::config::Config::load()
         .ok()
         .flatten()

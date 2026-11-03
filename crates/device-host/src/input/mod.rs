@@ -8,6 +8,10 @@ pub trait InputBackend: Send {
         true
     }
     fn event(&mut self, event: InputEvent) -> io::Result<()>;
+    fn supports_text(&self) -> bool { false }
+    fn text(&mut self, _text: &str) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "Unicode text is not implemented by this adapter"))
+    }
 }
 
 pub struct DryRun;

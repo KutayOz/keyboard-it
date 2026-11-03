@@ -876,6 +876,7 @@ pub fn check_devices() -> std::io::Result<()> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| std::io::Error::other("AppKit requires main thread"))?;
     let _app = NSApplication::sharedApplication(mtm);
+    crate::host::check_ui(mtm);
     let dir = std::env::temp_dir().join(format!(
         "keyboard-it-ui-{}",
         protocol::secure::generate_key()

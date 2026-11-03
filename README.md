@@ -1,6 +1,6 @@
 # keyboard-it
 
-Manage paired devices from your MacBook over the local network, with full Windows desktop control and native keyboard/mouse hosts for macOS and Linux X11. Android devices can be added through ADB and opened in a managed scrcpy window.
+Control paired devices from your MacBook or Android phone/tablet over the local network, with full Windows desktop control and native keyboard/mouse hosts for macOS and Linux X11. Android devices can be added through ADB and opened in a managed scrcpy window.
 
 keyboard-it saves multiple devices, pairs with each once, and reconnects to the selected
 device automatically. Open **Cihazlarım…** in the Mac menu bar to add, select or forget a PC
@@ -24,7 +24,8 @@ file transfer, or control of the Windows sign-in/UAC secure desktop. Screen stre
 resumes when the normal desktop becomes available again.
 
 See [Remote desktop setup, architecture and validation](docs/remote-desktop.md).
-See [Android USB/Wi-Fi setup and validation limits](docs/android.md).
+See [Android phone/tablet controller APK and setup](docs/android-controller.md).
+See [Mac → Android USB/Wi-Fi setup and validation limits](docs/android.md).
 See [Universal devices, access management and validation without physical devices](docs/universal-devices.md).
 
 ## How it works
@@ -197,7 +198,17 @@ Other things worth knowing:
   one is taken — which is why the installer's firewall rule covers the *program* rather
   than a fixed port.
 
-## Android
+## Android phone/tablet → Windows or Mac
+
+Install [keyboard-it-android.apk](https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-android.apk)
+on Android 8+ ARM64/x86_64. Windows supports screen and input; the Mac app's new
+**Android’den bu Mac’i kontrol et…** mode supports keyboard/mouse only (no Mac screen).
+New authenticated Unicode input requires an updated 0.7.0 host. Pause another controller
+before connecting to the same PC. Compare all eight fingerprint groups on both devices.
+Credentials use Android Keystore AES-GCM storage; backgrounding closes the session.
+See [setup, security, build and exact validation limits](docs/android-controller.md).
+
+## Mac → Android
 
 Open **Cihazlarım… → Android Ekle…** on the Mac. With ADB and scrcpy installed, refresh
 the list, approve USB debugging on the phone, select a ready device and save it. Then
@@ -336,3 +347,11 @@ and both apps must be 0.6.2 for new pairings. Existing sessions retain their sav
 Fixes a captured-handshake replay that could disconnect the active input controller,
 restricts the Windows firewall exception to the local subnet, and removes diagnostic
 auto-approval. See [security evidence and limits](docs/security-review.md).
+
+### 0.7.0 Android controller
+
+Adds an installable Android controller APK using the shared Rust Noise protocol, Windows
+H.264 viewing and touch control, an explicit Mac input-host mode with local pairing consent
+and revocation, and negotiated Unicode text input. Mac screen sharing remains unsupported.
+The Android and native tests are distinguished from physical phone/tablet validation in
+[Android controller documentation](docs/android-controller.md).

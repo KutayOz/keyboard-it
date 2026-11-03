@@ -140,6 +140,7 @@ define_class!(
         // terminate: (Quit menu item) fires on the main thread right before exit.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            crate::host::stop();
             crate::android::stop();
             crate::desktop::release_ui();
             crate::desktop::disconnect();
@@ -159,7 +160,10 @@ define_class!(
         // config.toml-in-a-text-editor path (Config::edit) is gone from the menu:
         // a non-technical user never has to see the file.
         #[unsafe(method(openDesktop:))]
-        fn open_desktop(&self, _sender: Option<&AnyObject>) { crate::desktop::open(self.mtm()); }
+        fn open_desktop(&self, _sender: Option<&AnyObject>) {
+            if crate::host::running() {show_alert(self.mtm(), "Mac alıcısı etkin", "Önce Mac alıcısını kapatın.");return;}
+            crate::desktop::open(self.mtm());
+        }
         #[unsafe(method(toggleDesktopMode:))]
         fn toggle_desktop_mode(&self, sender: Option<&AnyObject>) {
             crate::desktop::toggle_mode();
@@ -178,8 +182,16 @@ define_class!(
         fn toggle_stream_stats(&self, _sender: Option<&AnyObject>) { crate::desktop::toggle_stats(); }
         #[unsafe(method(exportStreamStats:))]
         fn export_stream_stats(&self, _sender: Option<&AnyObject>) { crate::desktop::export_metrics(self.mtm()); }
+        #[unsafe(method(toggleMacHost:))]
+        fn toggle_mac_host(&self, sender: Option<&AnyObject>) {
+            crate::host::toggle(self.mtm());
+            if let Some(item)=sender {unsafe {let _:()=msg_send![item,setState: if crate::host::running(){1isize}else{0isize}];}}
+        }
+        #[unsafe(method(macHostAccess:))]
+        fn mac_host_access(&self, _sender: Option<&AnyObject>) { crate::host::access(self.mtm()); }
         #[unsafe(method(toggleConnection:))]
         fn toggle_connection(&self, sender: Option<&AnyObject>) {
+            if crate::host::running() {show_alert(self.mtm(), "Mac alıcısı etkin", "Gönderimi açmak için önce Android’den bu Mac’i kontrol et… öğesinden alıcıyı kapatın.");return;}
             crate::desktop::toggle_connection();
             if let Some(item) = sender { unsafe { let _: () = msg_send![item, setState: if crate::desktop::shared().paused.load(Ordering::SeqCst) { 1isize } else { 0isize }]; } }
         }
@@ -257,6 +269,8 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
         .unwrap_or_default();
     for (title, action, checked) in [
         ("Ekranı Aç", sel!(openDesktop:), false),
+        ("Android’den bu Mac’i kontrol et…", sel!(toggleMacHost:), false),
+        ("Mac alıcı erişimleri…", sel!(macHostAccess:), false),
         (
             "Yalnız klavye/fare modu",
             sel!(toggleDesktopMode:),
@@ -390,6 +404,7 @@ pub fn install_status_updater(
     // None = write once on the first tick, whatever the initial title from setup() was.
     let last: Cell<Option<(bool, u8, bool, bool)>> = Cell::new(None);
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        crate::host::poll(mtm);
         crate::android::show_pending_error(mtm);
         let now = (
             active.load(Ordering::Relaxed)

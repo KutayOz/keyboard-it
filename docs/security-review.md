@@ -205,3 +205,30 @@ not a replacement for publisher signing.
   and [security considerations](https://noiseprotocol.org/noise.html#security-considerations).
 - [WiX FirewallException scope](https://docs.firegiant.com/wix3/xsd/firewall/firewallexception/).
 - [Android ADB Wi-Fi architecture](https://android.googlesource.com/platform/packages/modules/adb/+/refs/heads/main/docs/dev/adb_wifi.md).
+
+## 0.7.0 Android controller boundary
+
+The Android APK reuses this same Rust protocol through JNI; no new Noise implementation
+or pairing downgrade was added. Profiles are stored with Android Keystore AES-256-GCM,
+backup/device-transfer are disabled, and backgrounding cancels pairing/control. Encoded
+reference frames are ordered and bounded; overflow disconnects instead of dropping references.
+Mobile display/frame sizes are capped. Unicode text is independently negotiated, bounded to
+4096 UTF-8 bytes, and is dispatched only under the authorized input lease. Existing peers do
+not receive the new text record unless they advertise support.
+
+The Mac app's input host is off by default, requires explicit local startup and pairing consent,
+uses its own config/access policy, pauses outbound control, and supports revocation even with
+listeners stopped. Injected Quartz events carry a local loop-prevention marker; that marker
+is not treated as authentication. Mac screen/clipboard capture was not added or advertised.
+
+New controller/JNI registry dependency versions were queried against OSV/RustSec on 2026-11-04;
+the query returned no advisories for those added versions. Previously documented transitive
+maintenance notices remain. Local validation included 120 Rust tests, 2 Android unit tests and
+5 Android 15 ARM64 emulator tests (JNI/Noise, H.264 MediaCodec output, NSD, Keystore integrity,
+actual Activity touch dispatch and background teardown), plus native Mac smoke and Windows/Linux
+cross checks. These do not replace physical Android → Windows/Mac device validation.
+
+The release APK has a stable RSA-3072 signing key kept locally under ignored `.android-signing/`
+with private permissions; it is not committed or uploaded to CI. Public releases must attach
+that locally signed APK, not the CI debug-signed test artifact. Keep the private signing material
+backed up; its loss prevents in-place updates using the same app identity.

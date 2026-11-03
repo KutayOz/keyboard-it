@@ -121,8 +121,8 @@ export component SettingsWindow inherits Window {
 // on demand from Rust and always on top — it must not get lost behind other windows.
 export component PairRequestWindow inherits Window {
     title: "keyboard-it — pairing request";
-    preferred-width: 340px;
-    preferred-height: 250px;
+    preferred-width: 440px;
+    preferred-height: 500px;
     // min-* is load-bearing, not belt-and-braces. With preferred-* alone this window
     // opened at 178x261 on Windows 11 (measured): narrow enough that both paragraphs
     // wrapped onto extra lines, so the content grew taller than the frame and the
@@ -130,8 +130,8 @@ export component PairRequestWindow inherits Window {
     // impossible to answer — the only reachable affordances were the title-bar X and the
     // 60s timeout, and both of those decline. The height carries slack on purpose so a
     // 64-byte peer name wrapping to two or three lines still cannot push the buttons out.
-    min-width: 360px;
-    min-height: 430px;
+    min-width: 440px;
+    min-height: 500px;
     always-on-top: true;
 
     in property <string> peer-name;
@@ -147,7 +147,7 @@ export component PairRequestWindow inherits Window {
         spacing: 10px;
 
         Text {
-            text: "Allow this Mac to control this PC?";
+            text: "Bu cihazın bu bilgisayarı kontrol etmesine izin verilsin mi?";
             font-size: 15px;
             font-weight: 700;
             wrap: word-wrap;
@@ -169,7 +169,7 @@ export component PairRequestWindow inherits Window {
         }
 
         Text {
-            text: "Compare ALL 8 fingerprint groups on the Mac. Allow only if every group matches. Whoever you allow can type and click on this PC.";
+            text: "Karşı cihazdaki 8 parmak izi grubunun TAMAMINI karşılaştırın. Yalnız hepsi aynıysa izin verin. Onaylanan cihaz bu bilgisayarda yazabilir ve tıklayabilir.";
             font-size: 11px;
             color: #808080;
             wrap: word-wrap;
@@ -181,8 +181,8 @@ export component PairRequestWindow inherits Window {
         }
         HorizontalBox {
             spacing: 8px;
-            Button { text: "Deny"; clicked => { root.deny(); } }
-            Button { text: "Allow"; primary: true; clicked => { root.allow(); } }
+            Button { text: "Reddet"; clicked => { root.deny(); } }
+            Button { text: "İzin ver"; primary: true; clicked => { root.allow(); } }
         }
     }
 }

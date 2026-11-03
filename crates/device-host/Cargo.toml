@@ -35,3 +35,6 @@ core-graphics = { version = "0.25", features = ["highsierra"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11-dl = "2.21"
+
+[dev-dependencies]
+controller-client = { path = "../controller-client" }

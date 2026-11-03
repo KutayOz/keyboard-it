@@ -28,6 +28,8 @@ mod keymap;
 #[cfg(target_os = "macos")]
 mod menubar;
 #[cfg(target_os = "macos")]
+mod host;
+#[cfg(target_os = "macos")]
 mod permissions;
 #[cfg(target_os = "macos")]
 mod settings;

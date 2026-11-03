@@ -55,6 +55,20 @@ impl InputBackend for Macos {
     fn platform(&self) -> Platform {
         Platform::Macos
     }
+    fn supports_text(&self) -> bool { true }
+    fn text(&mut self, text: &str) -> io::Result<()> {
+        for chunk in text.chars().collect::<Vec<_>>().chunks(20) {
+            let text: String = chunk.iter().collect();
+            for down in [true, false] {
+                let event = CGEvent::new_keyboard_event(Self::source()?, 0, down)
+                    .map_err(|_| io::Error::other("Could not create Unicode event"))?;
+                event.set_string(&text);
+                event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, protocol::INJECTED_EVENT_TAG);
+                event.post(CGEventTapLocation::HID);
+            }
+        }
+        Ok(())
+    }
     fn event(&mut self, input: InputEvent) -> io::Result<()> {
         let unavailable = |_| io::Error::other("Could not create a Quartz input event");
         let event = match input {
@@ -137,6 +151,7 @@ impl InputBackend for Macos {
             .map_err(unavailable)?,
         };
         event.set_flags(self.flags());
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, protocol::INJECTED_EVENT_TAG);
         event.post(CGEventTapLocation::HID);
         Ok(())
     }

@@ -11,6 +11,8 @@ mdns-sd = "0.20"  # browse for the receiver on the LAN — replaces hand-typing 
 
 # core-graphics/core-foundation/objc2 resolve/compile only on macOS targets.
 [target.'cfg(target_os = "macos")'.dependencies]
+device-host = { path = "../device-host" }
+toml = "1"
 core-graphics = "0.25"
 core-foundation = "0.10"
 objc2 = "0.6"

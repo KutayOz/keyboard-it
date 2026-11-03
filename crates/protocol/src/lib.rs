@@ -196,6 +196,9 @@ impl InputEvent {
 
 /// Default TCP port: mac-sender connects to it, win-receiver listens on it.
 pub const DEFAULT_PORT: u16 = 5599;
+/// Local Quartz source marker prevents injected host input being forwarded again.
+/// This is loop prevention, never an authentication boundary.
+pub const INJECTED_EVENT_TAG: i64 = 0x4b4954484f5354;
 
 /// mDNS/DNS-SD service type. Defined once here so the win-receiver advertiser
 /// and the mac-sender browser can never drift apart on the service name.

@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 keyboard-it: a macOS menu-bar controller that drives paired devices on the LAN — keyboard/mouse
 forwarding (double-tap Fn), a full Windows remote desktop (H.264 over Noise), native input-only
-hosts for macOS/Linux X11, and Android through ADB + a managed scrcpy window. Rust workspace,
+hosts for macOS/Linux X11, Android targets through ADB + a managed scrcpy window, and a native Android controller APK.
+Android → Windows has screen/input; Android → Mac uses the explicit input-only Mac host. Rust workspace,
 single version in the root `Cargo.toml` `[workspace.package]` (all crates inherit it).
 
 ## Commands
@@ -69,6 +70,11 @@ Crate roles (dependency direction: everything → `protocol`):
   permissions walkthrough, devices window (`settings.rs`), mDNS discovery, and the remote
   desktop viewer (`desktop/`: network worker + VideoToolbox decode → latest-frame slot →
   AVSampleBufferDisplayLayer on the main thread). Most modules are `cfg(target_os = "macos")`.
+- `controller-client` — pinned mobile pairing/session transport, ordered bounded H.264 and input.
+- `android-native` — bounded JNI handles for that transport. `android/` is the Android Java UI,
+  NSD discovery, MediaCodec renderer and Keystore AES-GCM registry. No background input/clipboard.
+- `mac-sender/src/host.rs` — explicit input-only Mac receiver, local pairing consent and offline
+  access revocation. Uses separate mobile-host config. Disabled each launch; pauses outbound control.
 - `android-adapter` — ADB discovery/pairing and supervised scrcpy processes. Android records
   use ADB's authority and must never carry or activate native Noise credentials.
 
@@ -126,3 +132,15 @@ Invariants that span several files — preserve them when changing behavior:
 - `docs/*.md` track what is verified automatically vs on physical devices. Keep those
   statements honest when a change affects them; never mark something physically validated.
 - Commit subjects are imperative, sentence-case, outcome-focused (see `git log`).
+
+## Android builds
+
+`packaging/android/build.sh debug` builds ARM64/x86_64 native JNI libraries and runs Android
+lint. Requires JDK 21, SDK 35/build-tools 35.0.0, NDK 27.2.12479018 and Android Rust targets.
+`packaging/android/sign-release.py` keeps the stable signing key in ignored `.android-signing/`;
+never print, commit, upload, regenerate or delete that key/password for routine updates.
+CI test-signed APKs are not public release APKs. `publish-apk.py vVERSION` attaches the local
+signed APK and updates checksums only after all native/Android CI jobs pass. Gradle version
+comes from Cargo.toml. Native libraries must retain 16 KB ELF/ZIP alignment.
+The loopback-only `controller-client --example mobile_fixture` never injects OS input and
+exists solely for isolated emulator/JNI/MediaCodec tests. See docs/android-controller.md.
