@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "android-adapter"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "protocol",
 ]
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "device-host"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "core-graphics 0.25.0",
  "mdns-sd",
@@ -3028,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "mac-sender"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "android-adapter",
  "block2 0.6.2",
@@ -4061,7 +4061,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "blake2",
  "directories",
@@ -5861,7 +5861,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "win-receiver"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "device-host",
  "protocol",

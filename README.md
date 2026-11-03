@@ -286,7 +286,7 @@ Both screens show a full 256-bit fingerprint derived from the Noise handshake ha
 Compare **all eight groups** before allowing the request. An active intermediary establishes
 separate handshakes; matching their complete fingerprints requires a cryptographic collision.
 Approving without comparison still permits MITM. Pairing v2 refuses the old six-digit scheme;
-update both apps to 0.6.1 for new pairings. Existing saved session keys remain usable.
+update both apps to 0.6.2 for new pairings. Existing saved session keys remain usable.
 See [Security review and regression evidence](docs/security-review.md).
 
 The receiver limits abuse of that dialog: one request at a time, a 10-second I/O timeout, a
@@ -326,11 +326,11 @@ MIT — see [LICENSE](LICENSE).
 
 GPU üzerinde imleç/döndürme/ölçekleme ve NV12 dönüşümü, D3D11 yüzeylerinden donanım kodlama, 60/120 FPS profilleri ve Mac ekranına bağlı görüntü yenilemesi eklendi. Menüdeki **Görüntü kalitesi** ve **Performans bilgilerini göster** seçeneklerini kullanın. Masaüstü için her iki cihazın da 0.5.0 olması gerekir; eşleştirme korunur. Ayrıntılar ve ölçüm sınırları: [Remote desktop](docs/remote-desktop.md).
 
-### 0.6.1 device management and security
+### 0.6.2 device management and security
 
 Adds Android ADB/scrcpy integration, macOS/Linux X11 input hosts and individual controller
 revocation. Pairing now requires comparing the complete fingerprint (all eight groups),
-and both apps must be 0.6.1 for new pairings. Existing sessions retain their saved keys.
+and both apps must be 0.6.2 for new pairings. Existing sessions retain their saved keys.
 Fixes a captured-handshake replay that could disconnect the active input controller,
 restricts the Windows firewall exception to the local subnet, and removes diagnostic
 auto-approval. See [security evidence and limits](docs/security-review.md).

@@ -9,7 +9,7 @@ masaüstü görüntüleyicisi Android video protokolünü doğrudan çözmez.
 ve seçme, canlı görüntü ve fareyle kontrol doğrulandı.** Görüntü ve fare kontrolü
 kullanıcı tarafından açık telefon penceresinde onaylandı. Wi-Fi eşleştirmesi, klavye
 ve diğer cihaz modelleri henüz fiziksel olarak doğrulanmadı. Aşağıdaki akış bu
-0.6.1 uygulamasına aittir; fiziksel testin tarihi bu sürümden öncedir.
+0.6.2 uygulamasına aittir; fiziksel testin tarihi bu sürümden öncedir.
 
 ## Araçlar
 

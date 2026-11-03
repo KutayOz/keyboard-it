@@ -8,7 +8,7 @@ configuration. This is a source review with local adversarial regression tests, 
 cryptographic audit, a penetration test of the user's router, or physical Windows validation.
 
 Native traffic was already encrypted. Adding a second custom encryption layer would not address
-the concrete issues below. Version 0.6.1 strengthens authentication and source-address scope while
+the concrete issues below. Version 0.6.2 strengthens authentication and source-address scope while
 retaining Noise and existing session credentials. No evidence was found in the inspected native
 paths that a LAN observer without a pairing credential can decrypt a completed session or inject
 valid transport records. That bounded conclusion is not a claim that all software is vulnerability-free.
@@ -82,7 +82,7 @@ Generic collision search against a full 256-bit digest requires roughly 2^128 wo
 usual hash assumptions; this is a security estimate, not an empirical benchmark or proof of the
 entire application. Windows wraps the complete fingerprint; a native Mac check verifies that
 the label retains the complete string and has sufficient width. New pairing refuses v1 rather
-than silently downgrading. Both apps must be 0.6.1 for new pairings; saved session keys still work.
+than silently downgrading. Both apps must be 0.6.2 for new pairings; saved session keys still work.
 
 **Limit:** approving without comparison, or comparing only a prefix, still allows MITM. The longer
 fingerprint trades convenience for a large verification space without inventing a PAKE/commitment
@@ -160,7 +160,11 @@ Remaining lockfile matches are recorded rather than silently ignored:
   transitive font and D-Bus stack needs a separate tested framework migration.
 
 The initial 0.6.0 tag's build was cancelled before release publication to include this triage
-and the compatible security updates in 0.6.1. No released tag was rewritten.
+and the compatible security updates in the final release. The 0.6.1 run then caught a
+Windows-incompatible failure-injection test setup (renaming the parent of an open lock file).
+The fixture now obstructs the policy replacement path directly on all platforms. It still
+requires failed writes to preserve live access; no assertion was removed. Final publication
+uses 0.6.2. No released tag was rewritten.
 
 ## Remaining boundaries
 

@@ -156,9 +156,10 @@ fn failed_policy_writes_preserve_live_access_and_do_not_grant_unpersisted_keys()
     let key = store.authentication_keys()[0].clone();
     let (mut client, mut server) = sockets();
     let _lease = store.attach(&key, &server).unwrap();
-    let parent = path.parent().unwrap();
-    std::fs::rename(parent, fixture.0.join("displaced")).unwrap();
-    std::fs::write(parent, b"blocks directory creation").unwrap();
+    // Obstruct the atomic replacement without moving the live lock file's
+    // parent: Windows disallows that rename while the policy owner is open.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
     assert!(store.revoke(&key.id).is_err());
     assert!(store.grant("B", "b").is_err());
     assert!(store.revoke_all().is_err());
