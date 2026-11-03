@@ -6,7 +6,7 @@ use protocol::{
     pairing, secure, InputEvent,
 };
 use std::{
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     sync::mpsc,
     thread,
     time::Duration,
@@ -234,7 +234,7 @@ fn cancelled_pairing_cannot_return_a_saved_credential() {
         Some(PairEvent::Fingerprint(_))
     ));
     pair.cancel();
-    server_tx.send(()).unwrap();
+    let _ = server_tx.send(());
     server.join().unwrap();
     assert!(!matches!(
         pair.poll(Duration::from_millis(100)),
