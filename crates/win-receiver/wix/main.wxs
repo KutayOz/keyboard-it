@@ -162,11 +162,13 @@
                                   is refused must still install; the app degrades to the
                                   prompt path rather than failing setup.
                                 -->
+                                <!-- Limit source addresses to the local subnet even on a Public
+                                     profile; encryption still authenticates peers on that subnet. -->
                                 <fw:FirewallException
                                     Id='KeyboardItInbound'
                                     Name='keyboard-it receiver'
-                                    Description='Lets a paired Mac reach the keyboard-it receiver on this PC (session + pairing listeners).'
-                                    Scope='any'
+                                    Description='Allows local-subnet pairing and encrypted sessions from an approved Mac.'
+                                    Scope='localSubnet'
                                     Profile='all'
                                     IgnoreFailure='yes'/>
                             </File>

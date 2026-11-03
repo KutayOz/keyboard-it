@@ -10,6 +10,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use crate::devices::{PairedDevice, Permissions, Platform, SessionTarget};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,12 @@ pub enum Role {
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub devices: Vec<PairedDevice>,
+    #[serde(default)]
+    pub active_device_id: String,
+    #[serde(default)]
+    pub target_revision: u64,
     #[serde(default)]
     pub stream: crate::stream::StreamSettings,
     #[serde(default)]
@@ -69,6 +76,9 @@ fn default_port() -> u16 {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            devices: Vec::new(),
+            active_device_id: String::new(),
+            target_revision: 0,
             stream: Default::default(),
             show_stream_stats: false,
             device_id: String::new(),
@@ -89,6 +99,264 @@ impl Default for Config {
 static CONFIG_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Config {
+    pub fn active_device(&self) -> Option<&PairedDevice> {
+        self.devices.iter().find(|d| d.id == self.active_device_id)
+    }
+
+    pub fn android_selected(&self) -> bool {
+        self.active_device().is_some_and(PairedDevice::is_android)
+    }
+    fn clear_native_target(&mut self) {
+        self.shared_secret.clear();
+        self.peer_host.clear();
+        self.peer_ip.clear();
+        self.peer_device_id.clear();
+    }
+    pub fn permissions(&self) -> Permissions {
+        self.active_device()
+            .map(|d| d.permissions.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn session_target(&self) -> SessionTarget {
+        SessionTarget {
+            transport: self
+                .active_device()
+                .map(|d| d.transport.clone())
+                .unwrap_or_default(),
+            device: self.active_device_id.clone(),
+            revision: self.target_revision,
+            host: self.peer_host.clone(),
+            secret: self.shared_secret.clone(),
+        }
+    }
+
+    /// Import old sender settings without rotating their existing pairing key.
+    fn migrate_devices(&mut self) {
+        if self.role != Role::Sender
+            || !self.devices.is_empty()
+            || !self.active_device_id.is_empty()
+            || self.shared_secret.is_empty()
+            || self.peer_host.is_empty()
+        {
+            return;
+        }
+        // Stable across loads before the first save, unlike a random migration ID.
+        let id = format!("legacy:{}:{}", self.peer_host, self.port);
+        self.devices.push(PairedDevice {
+            transport: Default::default(),
+            capabilities: None,
+            id: id.clone(),
+            name: self.peer_host.clone(),
+            platform: Platform::Windows,
+            permissions: Permissions::default(),
+            peer_device_id: self.peer_device_id.clone(),
+            shared_secret: self.shared_secret.clone(),
+            host: self.peer_host.clone(),
+            ip: self.peer_ip.clone(),
+            port: self.port,
+            desktop_port: self.desktop_port,
+        });
+        self.active_device_id = id;
+    }
+
+    fn sync_active_device(&mut self) {
+        if self.role != Role::Sender {
+            return;
+        }
+        if let Some(d) = self
+            .devices
+            .iter_mut()
+            .find(|d| d.id == self.active_device_id)
+        {
+            if d.is_android() {
+                return;
+            }
+            d.peer_device_id = self.peer_device_id.clone();
+            d.shared_secret = self.shared_secret.clone();
+            d.host = self.peer_host.clone();
+            d.ip = self.peer_ip.clone();
+            d.port = self.port;
+            d.desktop_port = self.desktop_port;
+        }
+    }
+
+    pub fn activate_device(&mut self, id: &str) -> io::Result<()> {
+        let d = self
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Saved device not found"))?;
+        if self.active_device_id == id {
+            return Ok(());
+        }
+        self.sync_active_device();
+        self.target_revision = self
+            .target_revision
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("Selection revision exhausted"))?;
+        self.active_device_id = d.id.clone();
+        if d.is_android() {
+            self.clear_native_target();
+            return Ok(());
+        }
+        self.peer_device_id = d.peer_device_id;
+        self.peer_host = d.host;
+        self.peer_ip = d.ip;
+        self.port = d.port;
+        self.desktop_port = d.desktop_port;
+        self.shared_secret = d.shared_secret;
+        Ok(())
+    }
+
+    /// Adds a pairing without disconnecting the device currently in use.
+    /// Deduplication requires a pinned identity or the same approved credential
+    /// at the same host. Discovery names/addresses alone are never sufficient.
+    pub fn remember_device(&mut self, mut device: PairedDevice) -> io::Result<String> {
+        if !device.valid_connection() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Incomplete pairing",
+            ));
+        }
+        self.migrate_devices();
+        self.sync_active_device();
+        if device.is_android() {
+            if let Some(existing) = self.devices.iter().find(|d| {
+                d.android_identity()
+                    .zip(device.android_identity())
+                    .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+            }) {
+                device.id = existing.id.clone();
+                device.permissions = existing.permissions.clone();
+            }
+        } else if !device.peer_device_id.is_empty() {
+            if let Some(existing) = self
+                .devices
+                .iter()
+                .find(|d| !d.is_android() && d.peer_device_id == device.peer_device_id)
+            {
+                device.id = existing.id.clone();
+                device.permissions = existing.permissions.clone();
+                if device.capabilities.is_none() {
+                    device.capabilities = existing.capabilities.clone();
+                }
+            }
+        } else if let Some(existing) = self.devices.iter().find(|d| {
+            !d.is_android() && d.shared_secret == device.shared_secret && d.host == device.host
+        }) {
+            device.id = existing.id.clone();
+            device.peer_device_id = existing.peer_device_id.clone();
+            device.permissions = existing.permissions.clone();
+            if device.capabilities.is_none() {
+                device.capabilities = existing.capabilities.clone();
+            }
+        }
+        if device.platform == crate::devices::Platform::Unknown {
+            if let Some(caps) = &device.capabilities {
+                device.platform = caps.platform.clone();
+            }
+        }
+        if device.id.is_empty() {
+            device.id = crate::secure::generate_key();
+        }
+        if let Some(existing) = self.devices.iter().find(|d| d.id == device.id) {
+            if existing.peer_device_id != device.peer_device_id
+                || (existing.transport != device.transport
+                    && (existing.is_android() || device.is_android())
+                    && !existing
+                        .android_identity()
+                        .zip(device.android_identity())
+                        .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b)))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Device ID collision",
+                ));
+            }
+        }
+        let id = device.id.clone();
+        if self.active_device_id == id
+            && self.active_device().is_some_and(|d| {
+                d.shared_secret == device.shared_secret
+                    && d.transport == device.transport
+                    && d.host == device.host
+                    && d.port == device.port
+                    && d.desktop_port == device.desktop_port
+                    && d.permissions == device.permissions
+            })
+        {
+            // Reapproving the same pairing may refresh the label, not the session.
+            self.peer_ip = device.ip.clone();
+            if let Some(d) = self.devices.iter_mut().find(|d| d.id == id) {
+                *d = device;
+            }
+            return Ok(id);
+        }
+        // Updating an active record must go through activation to invalidate sessions.
+        let activate = self.active_device_id.is_empty() || self.active_device_id == id;
+        if self.active_device_id == id {
+            self.active_device_id.clear();
+        }
+        self.devices.retain(|d| d.id != id);
+        self.devices.push(device);
+        if activate {
+            self.activate_device(&id)?;
+        }
+        Ok(id)
+    }
+
+    /// Local forgetting only. Receiver-side access is not revoked.
+    pub fn forget_device(&mut self, id: &str) -> io::Result<()> {
+        if !self.devices.iter().any(|d| d.id == id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Saved device not found",
+            ));
+        }
+        if self.active_device_id == id {
+            self.target_revision = self
+                .target_revision
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Selection revision exhausted"))?;
+            self.active_device_id.clear();
+            self.shared_secret.clear();
+            self.peer_host.clear();
+            self.peer_ip.clear();
+            self.peer_device_id.clear();
+        }
+        self.devices.retain(|d| d.id != id);
+        // Never select another device automatically: input must have an explicit target.
+        Ok(())
+    }
+
+    pub fn set_device_permissions(&mut self, id: &str, permissions: Permissions) -> io::Result<()> {
+        let d = self
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Saved device not found"))?;
+        if d.permissions == permissions {
+            return Ok(());
+        }
+        if self.active_device_id == id {
+            self.target_revision = self
+                .target_revision
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Selection revision exhausted"))?;
+        }
+        d.permissions = permissions;
+        Ok(())
+    }
+
+    pub fn transaction<T>(f: impl FnOnce(&mut Config) -> io::Result<T>) -> io::Result<T> {
+        let _lock = CONFIG_WRITE.lock().unwrap();
+        let mut cfg = Self::load()?.unwrap_or_default();
+        let result = f(&mut cfg)?;
+        cfg.save_inner()?;
+        Ok(result)
+    }
     pub fn ensure_identity(&mut self) {
         if self.device_id.is_empty() {
             self.device_id = crate::secure::generate_key();
@@ -96,16 +364,19 @@ impl Config {
     }
     /// Reload-and-update transaction for background address/identity refreshes.
     pub fn update(f: impl FnOnce(&mut Config)) -> io::Result<()> {
-        let _lock = CONFIG_WRITE.lock().unwrap();
-        let mut cfg = Self::load()?.unwrap_or_default();
-        f(&mut cfg);
-        cfg.save_inner()
+        Self::transaction(|cfg| {
+            f(cfg);
+            Ok(())
+        })
     }
 
     /// Is first-run setup done? The sender needs somewhere to connect to; the
     /// receiver only needs the secret. Uses the same address list the sender
     /// actually dials, so "complete" can never disagree with "connectable".
     pub fn is_complete(&self) -> bool {
+        if self.role == Role::Sender && self.android_selected() {
+            return true;
+        }
         if self.shared_secret.is_empty() {
             return false;
         }
@@ -178,13 +449,44 @@ impl Config {
         let path = Self::path()?;
         match fs::read_to_string(&path) {
             Ok(text) => {
-                let cfg: Config = toml::from_str(&text)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                let cfg = Self::from_toml(&text)?;
                 Ok(Some(cfg))
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn from_toml(text: &str) -> io::Result<Self> {
+        let mut cfg: Self = toml::from_str(text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut ids = std::collections::HashSet::new();
+        for d in &cfg.devices {
+            if d.id.is_empty() || !ids.insert(&d.id) || !d.valid_connection() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid saved device registry",
+                ));
+            }
+        }
+        if !cfg.active_device_id.is_empty() && cfg.active_device().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Active device is missing",
+            ));
+        }
+        if cfg.role == Role::Sender && !cfg.devices.is_empty() && cfg.active_device_id.is_empty() {
+            // An unselected registry must never fall back to stale flat settings.
+            cfg.shared_secret.clear();
+            cfg.peer_host.clear();
+            cfg.peer_ip.clear();
+            cfg.peer_device_id.clear();
+        }
+        cfg.migrate_devices();
+        if cfg.role == Role::Sender && cfg.android_selected() {
+            cfg.clear_native_target();
+        }
+        Ok(cfg)
     }
 
     /// Open config.toml in the OS default text editor (macOS/Linux); creates a
@@ -227,8 +529,12 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text = toml::to_string_pretty(self)
+        let mut cfg = self.clone();
+        cfg.migrate_devices();
+        cfg.sync_active_device();
+        let text = toml::to_string_pretty(&cfg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Self::from_toml(&text)?; // reject invalid transactions before replacing the file
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, &text)?;
         // Cheap hardening: 0600 on Unix (the secret is stored in plaintext).

@@ -39,8 +39,7 @@ pub fn generate_key() -> String {
 /// Minimal base64url (RFC 4648 section 5) encoder without padding — one call
 /// site does not justify pulling a base64 crate into the workspace.
 fn base64url_nopad(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         // Pack up to 3 bytes into a 24-bit group, zero-filling the tail.
@@ -72,6 +71,9 @@ pub fn psk_from_secret(secret: &str) -> [u8; 32] {
 /// config value is empty (backward compat/dev). The config file is the source of
 /// truth; the env var is only a fallback.
 pub fn psk_from_config_or_env(cfg: &crate::config::Config) -> io::Result<[u8; 32]> {
+    if cfg.android_selected() {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "ADB target does not use a native Noise session"));
+    }
     if !cfg.shared_secret.is_empty() {
         return Ok(psk_from_secret(&cfg.shared_secret));
     }
@@ -104,7 +106,10 @@ pub(crate) fn read_frame<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize
     r.read_exact(&mut len)?;
     let n = u32::from_be_bytes(len) as usize;
     if n == 0 || n > MAX_FRAME || n > buf.len() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid frame length"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid frame length",
+        ));
     }
     r.read_exact(&mut buf[..n])?;
     Ok(n)
@@ -113,22 +118,48 @@ pub(crate) fn read_frame<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<usize
 /// mac-sender side (TCP client = Noise initiator).
 /// NNpsk0 = 2 messages:  -> e, psk   then   <- e, ee.
 /// Call once right after TCP connect, before any KeyEvent.
+/// Optional desktop features are negotiated inside the authenticated Noise
+/// payload. Old peers ignore the offer and reply empty, preserving protocol v1.
+pub const FEATURE_CAPABILITIES: u32 = 1;
+const EXTENSION: &[u8] = b"KI\x01";
+
+fn feature_payload(features: u32) -> Vec<u8> {
+    let mut out = EXTENSION.to_vec();
+    out.extend(features.to_be_bytes());
+    out
+}
+fn offered_features(payload: &[u8]) -> u32 {
+    if payload.len() == 7 && payload.starts_with(EXTENSION) {
+        u32::from_be_bytes(payload[3..7].try_into().unwrap())
+    } else {
+        0
+    }
+}
+
 pub fn handshake_initiator<S: Read + Write>(
     s: &mut S,
     psk: &[u8; 32],
 ) -> io::Result<snow::TransportState> {
+    handshake_initiator_with_features(s, psk, 0).map(|v| v.0)
+}
+
+pub fn handshake_initiator_with_features<S: Read + Write>(
+    s: &mut S,
+    psk: &[u8; 32],
+    features: u32,
+) -> io::Result<(snow::TransportState, u32)> {
     let mut hs = snow::Builder::new(NOISE_PARAMS.parse().map_err(noise_err)?)
-        .psk(0, psk) // psk0: the PSK is mixed in BEFORE the first message
+        .psk(0, psk)
         .map_err(noise_err)?
         .build_initiator()
         .map_err(noise_err)?;
     let mut buf = [0u8; MAX_FRAME];
-    // -> e, psk  (message 1) — payload: 1-byte protocol version (encrypted/authenticated)
-    let n = hs.write_message(&[PROTOCOL_VERSION], &mut buf).map_err(noise_err)?;
+    let mut hello = vec![PROTOCOL_VERSION];
+    if features != 0 {
+        hello.extend(feature_payload(features));
+    }
+    let n = hs.write_message(&hello, &mut buf).map_err(noise_err)?;
     write_frame(s, &buf[..n])?;
-    // <- e, ee   (message 2) — into_transport_mode() PANICS unless this is read first.
-    // If the peer closes the connection here (wrong PSK or version rejection), replace
-    // the raw UnexpectedEof with a diagnostic message; fail-closed behavior is unchanged.
     let n = read_frame(s, &mut buf).map_err(|e| match e.kind() {
         io::ErrorKind::UnexpectedEof
         | io::ErrorKind::ConnectionReset
@@ -139,43 +170,67 @@ pub fn handshake_initiator<S: Read + Write>(
         _ => e,
     })?;
     let mut tmp = [0u8; MAX_FRAME];
-    hs.read_message(&buf[..n], &mut tmp).map_err(noise_err)?;
-    hs.into_transport_mode().map_err(noise_err)
+    let m = hs.read_message(&buf[..n], &mut tmp).map_err(noise_err)?;
+    let negotiated = offered_features(&tmp[..m]) & features;
+    Ok((hs.into_transport_mode().map_err(noise_err)?, negotiated))
 }
 
-/// win-receiver side (TCP server = Noise responder).
-/// Call once right after TCP accept, before the read loop.
 pub fn handshake_responder<S: Read + Write>(
     s: &mut S,
     psk: &[u8; 32],
 ) -> io::Result<snow::TransportState> {
-    let mut hs = snow::Builder::new(NOISE_PARAMS.parse().map_err(noise_err)?)
-        .psk(0, psk)
-        .map_err(noise_err)?
-        .build_responder()
-        .map_err(noise_err)?;
-    let mut buf = [0u8; MAX_FRAME];
-    // <- e, psk  (message 1) — a wrong PSK fails here with a Decrypt error (fail-closed)
-    let n = read_frame(s, &mut buf)?;
-    let mut tmp = [0u8; MAX_FRAME];
-    let m = hs.read_message(&buf[..n], &mut tmp).map_err(noise_err)?;
-    // First payload byte = the peer's protocol version. An empty payload means an old
-    // sender without the version field. Extra bytes are ignored for forward
-    // compatibility. On mismatch, return an error that names the cause instead of a
-    // silent connect/drop loop.
-    let peer_ver = if m >= 1 { tmp[0] } else { 0 };
-    if peer_ver != PROTOCOL_VERSION {
+    handshake_responder_many(s, &[*psk], 0).map(|v| v.0)
+}
+
+/// Try a bounded keyring against the same first authenticated frame. No new
+/// cleartext key selector or wire format is needed; older controllers work too.
+/// The caller must recheck the selected credential before granting input.
+pub fn handshake_responder_many<S: Read + Write>(
+    s: &mut S,
+    psks: &[[u8; 32]],
+    features: u32,
+) -> io::Result<(snow::TransportState, usize, u32)> {
+    if psks.len() > crate::access::MAX_CONTROLLERS + 1 {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "protocol version mismatch: local {PROTOCOL_VERSION}, peer {peer_ver} — update both sides"
-            ),
+            io::ErrorKind::InvalidInput,
+            "Controller keyring exceeds limit",
         ));
     }
-    // -> e, ee   (message 2)
-    let n = hs.write_message(&[], &mut buf).map_err(noise_err)?;
-    write_frame(s, &buf[..n])?;
-    hs.into_transport_mode().map_err(noise_err)
+    let mut buf = [0u8; 256];
+    let n = read_frame(s, &mut buf)?;
+    let mut tmp = [0u8; 256];
+    for (index, psk) in psks.iter().enumerate() {
+        let mut hs = snow::Builder::new(NOISE_PARAMS.parse().map_err(noise_err)?)
+            .psk(0, psk)
+            .map_err(noise_err)?
+            .build_responder()
+            .map_err(noise_err)?;
+        let Ok(m) = hs.read_message(&buf[..n], &mut tmp) else {
+            continue;
+        };
+        let peer_ver = tmp.first().copied().filter(|_| m > 0).unwrap_or(0);
+        if peer_ver != PROTOCOL_VERSION {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+                "protocol version mismatch: local {PROTOCOL_VERSION}, peer {peer_ver} — update both sides")));
+        }
+        let negotiated = offered_features(&tmp[1..m]) & features;
+        let response = if negotiated != 0 {
+            feature_payload(negotiated)
+        } else {
+            Vec::new()
+        };
+        let n = hs.write_message(&response, &mut buf).map_err(noise_err)?;
+        write_frame(s, &buf[..n])?;
+        return Ok((
+            hs.into_transport_mode().map_err(noise_err)?,
+            index,
+            negotiated,
+        ));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "No authorized controller key matched",
+    ))
 }
 
 /// Encrypted send: encode the InputEvent (key or mouse), encrypt, frame.
@@ -186,7 +241,9 @@ pub fn send_event<S: Write>(
 ) -> io::Result<()> {
     let (plain, plen) = ev.encode(); // ([u8; INPUT_MAX_LEN], usize)
     let mut ct = [0u8; INPUT_MAX_LEN + 16]; // plaintext + 16-byte Poly1305 tag
-    let n = t.write_message(&plain[..plen], &mut ct).map_err(noise_err)?;
+    let n = t
+        .write_message(&plain[..plen], &mut ct)
+        .map_err(noise_err)?;
     write_frame(s, &ct[..n])
 }
 
@@ -194,10 +251,7 @@ pub fn send_event<S: Write>(
 /// or replayed frames automatically (replay protection for free). A closed connection
 /// makes read_exact return UnexpectedEof. Length validation is per-variant inside
 /// InputEvent::decode.
-pub fn recv_event<S: Read>(
-    t: &mut snow::TransportState,
-    s: &mut S,
-) -> io::Result<InputEvent> {
+pub fn recv_event<S: Read>(t: &mut snow::TransportState, s: &mut S) -> io::Result<InputEvent> {
     let mut frame = [0u8; INPUT_MAX_LEN + 16];
     let n = read_frame(s, &mut frame)?;
     let mut plain = [0u8; INPUT_MAX_LEN + 16];
@@ -219,6 +273,43 @@ mod tests {
         let c = thread::spawn(move || TcpStream::connect(addr).unwrap());
         let (s, _) = l.accept().unwrap();
         (c.join().unwrap(), s)
+    }
+
+    fn transports() -> (snow::TransportState, snow::TransportState) {
+        let psk = psk_from_secret("random-test-fixture-only");
+        let (mut client, mut server) = pair();
+        let initiator = thread::spawn(move || handshake_initiator(&mut client, &psk).unwrap());
+        let receiver = handshake_responder(&mut server, &psk).unwrap();
+        (initiator.join().unwrap(), receiver)
+    }
+
+    #[test]
+    fn modified_replayed_and_cross_session_ciphertext_is_rejected() {
+        let (mut sender, mut receiver) = transports();
+        let event = InputEvent::MouseMove { dx: 7, dy: -3 };
+        let mut captured = Vec::new();
+        send_event(&mut sender, &mut captured, &event).unwrap();
+        assert_eq!(recv_event(&mut receiver, &mut io::Cursor::new(&captured)).unwrap(), event);
+        // A nonce already consumed in this session cannot be used again.
+        assert!(recv_event(&mut receiver, &mut io::Cursor::new(&captured)).is_err());
+        let (_, mut fresh) = transports();
+        assert!(recv_event(&mut fresh, &mut io::Cursor::new(&captured)).is_err());
+        let (mut sender, mut receiver) = transports();
+        let mut modified = Vec::new();
+        send_event(&mut sender, &mut modified, &event).unwrap();
+        *modified.last_mut().unwrap() ^= 1;
+        assert!(recv_event(&mut receiver, &mut io::Cursor::new(modified)).is_err());
+    }
+
+    #[test]
+    fn wrong_pairing_key_cannot_authenticate() {
+        let (mut client, mut server) = pair();
+        let initiator = thread::spawn(move || {
+            handshake_initiator(&mut client, &psk_from_secret("attacker-key")).is_err()
+        });
+        assert!(handshake_responder(&mut server, &psk_from_secret("approved-key")).is_err());
+        drop(server);
+        assert!(initiator.join().unwrap());
     }
 
     #[test]
@@ -244,7 +335,8 @@ mod tests {
         // or control chars — nothing that would ever need escaping.
         for k in [&a, &b] {
             assert!(
-                k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                k.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
                 "unexpected char in key: {k}"
             );
         }
@@ -259,7 +351,10 @@ mod tests {
             send_event(&mut t, &mut ci, &InputEvent::MouseMove { dx: 3, dy: -4 }).unwrap();
         });
         let mut t = handshake_responder(&mut cr, &psk).unwrap();
-        assert_eq!(recv_event(&mut t, &mut cr).unwrap(), InputEvent::MouseMove { dx: 3, dy: -4 });
+        assert_eq!(
+            recv_event(&mut t, &mut cr).unwrap(),
+            InputEvent::MouseMove { dx: 3, dy: -4 }
+        );
         init.join().unwrap();
     }
 

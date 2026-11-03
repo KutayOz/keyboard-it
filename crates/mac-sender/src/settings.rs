@@ -24,7 +24,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSPopUpButton, NSTextField, NSWindow,
+    NSApplication, NSBackingStoreType, NSButton, NSFont, NSPopUpButton, NSTextField, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -84,6 +84,7 @@ pub fn set_conn_status_source(src: Arc<AtomicU8>) {
 /// Network access works, and it is the only such proof that does not depend on
 /// mDNS finding anything.
 pub fn is_connected() -> bool {
+    if load_config().android_selected() { return false; }
     CONN_STATUS
         .get()
         .is_some_and(|s| ConnStatus::from_u8(s.load(Ordering::Relaxed)) == ConnStatus::Connected)
@@ -91,12 +92,12 @@ pub fn is_connected() -> bool {
 
 fn conn_status_text(s: ConnStatus) -> &'static str {
     match s {
-        ConnStatus::ConfigNeeded => "Not paired — pick your PC below and click Pair & Connect.",
+        ConnStatus::ConfigNeeded => "Not paired — pick your device below and click Pair & Connect.",
         ConnStatus::Connecting => "Connecting…",
         ConnStatus::Connected => "Connected.",
         ConnStatus::Disconnected => "No connection — retrying in the background.",
-        ConnStatus::HandshakeFailed => "The PC rejected the key — pair again.",
-        ConnStatus::Unreachable => "Can't reach your PC — pick it again and Pair & Connect.",
+        ConnStatus::HandshakeFailed => "The device rejected the key — pair again.",
+        ConnStatus::Unreachable => "Can't reach your device — pick it again and Pair & Connect.",
     }
 }
 
@@ -105,7 +106,7 @@ pub fn open(mtm: MainThreadMarker) {
     CONTROLLER.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
-            *slot = Some(SettingsController::create(mtm));
+            *slot = Some(SettingsController::create(mtm, true));
         }
         let c = slot.as_ref().unwrap();
         // Reload from disk only when hidden: reopening must not clobber edits in
@@ -126,6 +127,13 @@ pub fn open(mtm: MainThreadMarker) {
 /// Ivars of the controller: the window, its controls, and the discovery state.
 struct Ivars {
     window: Retained<NSWindow>,
+    saved_popup: Retained<NSPopUpButton>,
+    shown_devices: RefCell<Vec<(String, String)>>,
+    connect_button: Retained<NSButton>,
+    open_button: Retained<NSButton>,
+    screen_check: Retained<NSButton>,
+    input_check: Retained<NSButton>,
+    clipboard_check: Retained<NSButton>,
     popup: Retained<NSPopUpButton>,
     autostart_check: Retained<NSButton>,
     status_label: Retained<NSTextField>,
@@ -155,6 +163,58 @@ define_class!(
     unsafe impl NSObjectProtocol for SettingsController {}
 
     impl SettingsController {
+        #[unsafe(method(addAndroid:))]
+        fn add_android(&self, _sender: Option<&AnyObject>) { crate::android::open_setup(self.mtm()); }
+
+        #[unsafe(method(savedSelected:))]
+        fn savedSelected(&self, _sender: Option<&AnyObject>) {
+            self.refresh_permissions();
+            self.refresh_buttons();
+            self.refresh_hint();
+        }
+
+        #[unsafe(method(connectSaved:))]
+        fn connectSaved(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.selected_device() else { return; };
+            crate::desktop::prepare_target_change();
+            match protocol::config::Config::transaction(|c| c.activate_device(&id)) {
+                Ok(()) => self.set_status("Cihaz seçildi. Görüntü için Ekranı Aç düğmesini kullanın.", Duration::from_secs(5)),
+                Err(e) => self.set_status(&format!("Cihaz seçilemedi: {e}"), Duration::from_secs(6)),
+            }
+            crate::capture::CONFIG_DIRTY.store(true, Ordering::SeqCst);
+            crate::android::update_selection(&load_config());
+            self.refresh_saved();
+            self.refresh_paired_label();
+        }
+
+        #[unsafe(method(openSaved:))]
+        fn openSaved(&self, _sender: Option<&AnyObject>) {
+            let cfg = load_config();
+            if self.selected_device().as_deref() == Some(cfg.active_device_id.as_str())
+                && cfg.active_device().is_some_and(|d| d.permissions.screen)
+            {
+                crate::desktop::open(self.mtm());
+            }
+        }
+
+        #[unsafe(method(changePermissions:))]
+        fn changePermissions(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.selected_device() else { return; };
+            let iv = self.ivars();
+            let checked = |b: &NSButton| -> bool { unsafe { let v: isize = msg_send![b, state]; v == 1 } };
+            let permissions = protocol::devices::Permissions {
+                screen: checked(&iv.screen_check), input: checked(&iv.input_check),
+                clipboard: checked(&iv.clipboard_check),
+            };
+            let active = load_config().active_device_id == id;
+            if active { crate::desktop::prepare_target_change(); }
+            let result = protocol::config::Config::transaction(|c| {
+                c.set_device_permissions(&id, permissions)
+            });
+            if active { crate::capture::CONFIG_DIRTY.store(true, Ordering::SeqCst); }
+            if let Err(e) = result { self.set_status(&format!("İzinler kaydedilemedi: {e}"), Duration::from_secs(6)); }
+            self.refresh_permissions();
+        }
         // Selecting a PC only moves the highlight; pairing is an explicit click,
         // because it puts a dialog on someone else's screen.
         #[unsafe(method(popupSelected:))]
@@ -181,7 +241,7 @@ define_class!(
         fn pairAndConnect(&self, _sender: Option<&AnyObject>) {
             let iv = self.ivars();
             let Some(peer) = self.selected_peer() else {
-                self.set_status("Choose your PC from the list first.", Duration::from_secs(5));
+                self.set_status("Choose your device from the list first.", Duration::from_secs(5));
                 return;
             };
             // Guard against a double click landing two workers on one answer slot.
@@ -205,19 +265,17 @@ define_class!(
         // needs another approval there.
         #[unsafe(method(unpair:))]
         fn unpair(&self, _sender: Option<&AnyObject>) {
-            let mut cfg = load_config();
-            cfg.shared_secret.clear();
-            cfg.peer_host.clear();
-            cfg.peer_ip.clear();
-            cfg.peer_device_id.clear();
-            crate::desktop::disconnect();
-            match cfg.save() {
+            let Some(id) = self.selected_device() else { return; };
+            let active = load_config().active_device_id == id;
+            if active { crate::desktop::prepare_target_change(); }
+            match protocol::config::Config::transaction(|c| c.forget_device(&id)) {
                 Ok(()) => {
-                    crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed);
-                    self.set_status("Unpaired.", Duration::from_secs(4));
+                    if active { crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed); }
+                    self.set_status("Cihaz bu Mac'ten kaldırıldı.", Duration::from_secs(4));
                 }
                 Err(e) => self.set_status(&format!("Could not unpair: {e}"), Duration::from_secs(6)),
             }
+            self.refresh_saved();
             self.refresh_paired_label();
             self.refresh_buttons();
         }
@@ -230,6 +288,8 @@ define_class!(
                 return;
             }
             self.refresh_popup();
+            self.refresh_saved();
+            self.refresh_paired_label();
             self.refresh_hint();
             self.sync_autostart();
             self.refresh_status();
@@ -240,11 +300,11 @@ define_class!(
 
 impl SettingsController {
     /// Build the window + controls, wire targets, start discovery and the timer.
-    fn create(mtm: MainThreadMarker) -> Retained<Self> {
+    fn create(mtm: MainThreadMarker, browse: bool) -> Retained<Self> {
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable;
-        let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(460.0, 210.0));
+        let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(640.0, 360.0));
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -257,7 +317,7 @@ impl SettingsController {
         // Programmatic NSWindows default to releasedWhenClosed=YES, which would
         // over-release under Retained on close — objc2 requires turning it off.
         unsafe { window.setReleasedWhenClosed(false) };
-        window.setTitle(ns_string!("keyboard-it Settings"));
+        window.setTitle(ns_string!("keyboard-it — Cihazlarım"));
         window.center();
 
         let label = |text: &NSString, x: f64, y: f64, w: f64| -> Retained<NSTextField> {
@@ -266,10 +326,51 @@ impl SettingsController {
             l
         };
 
-        let pc_label = label(ns_string!("Your Windows PC"), 16.0, 168.0, 118.0);
+        let saved_label = label(ns_string!("Cihazlarım"), 16.0, 320.0, 118.0);
+        let saved_popup = NSPopUpButton::initWithFrame_pullsDown(
+            NSPopUpButton::alloc(mtm),
+            NSRect::new(NSPoint::new(138.0, 314.0), NSSize::new(486.0, 26.0)),
+            false,
+        );
+        saved_popup.addItemWithTitle(ns_string!("Henüz kayıtlı cihaz yok"));
+        saved_popup.setEnabled(false);
+        let connect_button = unsafe {
+            NSButton::buttonWithTitle_target_action(ns_string!("Bu Cihaza Geç"), None, None, mtm)
+        };
+        connect_button.setFrame(NSRect::new(
+            NSPoint::new(464.0, 270.0),
+            NSSize::new(160.0, 32.0),
+        ));
+        let open_button = unsafe {
+            NSButton::buttonWithTitle_target_action(ns_string!("Ekranı Aç"), None, None, mtm)
+        };
+        open_button.setFrame(NSRect::new(
+            NSPoint::new(288.0, 270.0),
+            NSSize::new(160.0, 32.0),
+        ));
+        let screen_check = unsafe {
+            NSButton::checkboxWithTitle_target_action(ns_string!("Ekran"), None, None, mtm)
+        };
+        let input_check = unsafe {
+            NSButton::checkboxWithTitle_target_action(ns_string!("Klavye / fare"), None, None, mtm)
+        };
+        let clipboard_check = unsafe {
+            NSButton::checkboxWithTitle_target_action(ns_string!("Metin panosu"), None, None, mtm)
+        };
+        for (button, x, width) in [
+            (&screen_check, 138.0, 100.0),
+            (&input_check, 250.0, 150.0),
+            (&clipboard_check, 414.0, 180.0),
+        ] {
+            button.setFrame(NSRect::new(
+                NSPoint::new(x, 238.0),
+                NSSize::new(width, 24.0),
+            ));
+        }
+        let pc_label = label(ns_string!("Yeni cihaz ekle"), 16.0, 198.0, 118.0);
         let popup = NSPopUpButton::initWithFrame_pullsDown(
             NSPopUpButton::alloc(mtm),
-            NSRect::new(NSPoint::new(138.0, 162.0), NSSize::new(306.0, 26.0)),
+            NSRect::new(NSPoint::new(138.0, 192.0), NSSize::new(486.0, 26.0)),
             false,
         );
         // Placeholder until discovery reports something (refresh_popup rebuilds).
@@ -277,58 +378,89 @@ impl SettingsController {
         popup.setEnabled(false);
 
         let hint = label(
-            ns_string!("Pick your PC, then click Allow on it."),
-            138.0,
-            136.0,
-            306.0,
+            ns_string!("Compare all 8 fingerprint groups on both devices before Allow."),
+            16.0,
+            42.0,
+            608.0,
         );
 
         let pair_button = unsafe {
             NSButton::buttonWithTitle_target_action(ns_string!("Pair & Connect"), None, None, mtm)
         };
         pair_button.setFrame(NSRect::new(
-            NSPoint::new(294.0, 96.0),
+            NSPoint::new(464.0, 144.0),
             NSSize::new(150.0, 32.0),
         ));
+        let android_button = unsafe {
+            NSButton::buttonWithTitle_target_action(ns_string!("Android Ekle…"), None, None, mtm)
+        };
+        android_button.setFrame(NSRect::new(NSPoint::new(16.0, 144.0), NSSize::new(160.0, 32.0)));
         // Return triggers pairing — the whole flow works keyboard-only.
         pair_button.setKeyEquivalent(ns_string!("\r"));
 
-        let paired_label = label(ns_string!(""), 16.0, 103.0, 270.0);
+        let paired_label = label(ns_string!(""), 16.0, 112.0, 608.0);
         let unpair_button = unsafe {
-            NSButton::buttonWithTitle_target_action(ns_string!("Unpair"), None, None, mtm)
+            NSButton::buttonWithTitle_target_action(ns_string!("Cihazı Unut"), None, None, mtm)
         };
         unpair_button.setFrame(NSRect::new(
-            NSPoint::new(16.0, 56.0),
-            NSSize::new(100.0, 32.0),
+            NSPoint::new(16.0, 270.0),
+            NSSize::new(130.0, 32.0),
         ));
 
         let autostart_check = unsafe {
             NSButton::checkboxWithTitle_target_action(ns_string!("Start at Login"), None, None, mtm)
         };
         autostart_check.setFrame(NSRect::new(
-            NSPoint::new(130.0, 64.0),
+            NSPoint::new(16.0, 78.0),
             NSSize::new(220.0, 18.0),
         ));
 
-        let status_label = label(ns_string!(""), 16.0, 20.0, 428.0);
+        let status_label = label(ns_string!(""), 16.0, 16.0, 608.0);
+        status_label.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(12.0, 0.0)));
 
         let content_view = window
             .contentView()
             .expect("titled window has a content view");
-        for view in [&*pc_label, &*hint, &*paired_label, &*status_label] {
+        for view in [
+            &*saved_label,
+            &*pc_label,
+            &*hint,
+            &*paired_label,
+            &*status_label,
+        ] {
             content_view.addSubview(view);
         }
         content_view.addSubview(&popup);
         content_view.addSubview(&pair_button);
+        content_view.addSubview(&android_button);
         content_view.addSubview(&unpair_button);
         content_view.addSubview(&autostart_check);
+        content_view.addSubview(&saved_popup);
+        for button in [
+            &connect_button,
+            &open_button,
+            &screen_check,
+            &input_check,
+            &clipboard_check,
+        ] {
+            content_view.addSubview(&**button);
+        }
 
         // Idempotent: the permissions window may already have started the browse
         // (and with it raised the Local Network prompt) — this is then a no-op.
-        discovery::start();
+        if browse {
+            discovery::start();
+        }
 
         let this = Self::alloc(mtm).set_ivars(Ivars {
             window,
+            saved_popup: saved_popup.clone(),
+            shown_devices: RefCell::new(Vec::new()),
+            connect_button: connect_button.clone(),
+            open_button: open_button.clone(),
+            screen_check: screen_check.clone(),
+            input_check: input_check.clone(),
+            clipboard_check: clipboard_check.clone(),
             popup: popup.clone(),
             autostart_check: autostart_check.clone(),
             status_label,
@@ -350,8 +482,16 @@ impl SettingsController {
         };
         wire(&autostart_check, sel!(toggleAutostart:));
         wire(&pair_button, sel!(pairAndConnect:));
+        wire(&android_button, sel!(addAndroid:));
         wire(&unpair_button, sel!(unpair:));
+        wire(&connect_button, sel!(connectSaved:));
+        wire(&open_button, sel!(openSaved:));
+        for check in [&screen_check, &input_check, &clipboard_check] {
+            wire(check, sel!(changePermissions:));
+        }
         unsafe {
+            saved_popup.setTarget(Some(&*this));
+            saved_popup.setAction(Some(sel!(savedSelected:)));
             popup.setTarget(Some(&*this));
             popup.setAction(Some(sel!(popupSelected:)));
         }
@@ -372,6 +512,7 @@ impl SettingsController {
 
     /// Re-read config-derived UI (called when the window opens).
     fn load_fields_from_config(&self) {
+        self.refresh_saved();
         self.refresh_paired_label();
         self.refresh_hint();
         self.sync_autostart();
@@ -383,13 +524,102 @@ impl SettingsController {
     fn refresh_paired_label(&self) {
         let cfg = load_config();
         let text = if cfg.is_complete() {
-            format!("Paired with {}", cfg.peer_host)
+            format!(
+                "Aktif cihaz: {}",
+                cfg.active_device()
+                    .map(|d| d.name.as_str())
+                    .unwrap_or(&cfg.peer_host)
+            )
         } else {
-            "Not paired yet".to_string()
+            "Aktif cihaz seçilmedi".to_string()
         };
         let iv = self.ivars();
         if iv.paired_label.stringValue().to_string() != text {
             iv.paired_label.setStringValue(&NSString::from_str(&text));
+        }
+    }
+
+    fn selected_device(&self) -> Option<String> {
+        let iv = self.ivars();
+        let index = iv.saved_popup.indexOfSelectedItem();
+        if index < 1 {
+            return None;
+        }
+        iv.shown_devices
+            .borrow()
+            .get((index - 1) as usize)
+            .map(|d| d.0.clone())
+    }
+
+    fn refresh_permissions(&self) {
+        let cfg = load_config();
+        let id = self.selected_device();
+        let permissions = cfg
+            .devices
+            .iter()
+            .find(|d| Some(&d.id) == id.as_ref())
+            .map(|d| &d.permissions);
+        let iv = self.ivars();
+        for (button, checked) in [
+            (&iv.screen_check, permissions.is_some_and(|p| p.screen)),
+            (&iv.input_check, permissions.is_some_and(|p| p.input)),
+            (
+                &iv.clipboard_check,
+                permissions.is_some_and(|p| p.clipboard),
+            ),
+        ] {
+            button.setEnabled(permissions.is_some());
+            unsafe {
+                let _: () = msg_send![&**button, setState: if checked {1isize} else {0isize}];
+            }
+        }
+    }
+
+    fn refresh_saved(&self) {
+        let cfg = load_config();
+        let peers = discovery::peers();
+        let now: Vec<_> = cfg
+            .devices
+            .iter()
+            .map(|d| {
+                let online = peers.iter().any(|p| {
+                    if !d.peer_device_id.is_empty() {
+                        p.device_id == d.peer_device_id
+                    } else {
+                        p.hostname == d.host || p.host == d.ip
+                    }
+                });
+                let state = if d.is_android() && cfg.active_device_id == d.id {
+                    "aktif · Android"
+                } else if d.is_android() {
+                    "Android · kayıtlı"
+                } else if cfg.active_device_id == d.id {
+                    "aktif"
+                } else if online {
+                    "ağda"
+                } else {
+                    "ağda görünmüyor"
+                };
+                (d.id.clone(), format!("{} — {}", d.name, state))
+            })
+            .collect();
+        let iv = self.ivars();
+        if now != *iv.shown_devices.borrow() {
+            let selected = self
+                .selected_device()
+                .unwrap_or_else(|| cfg.active_device_id.clone());
+            iv.saved_popup.removeAllItems();
+            iv.saved_popup
+                .addItemWithTitle(ns_string!("Kayıtlı bir cihaz seçin…"));
+            for (_, title) in &now {
+                iv.saved_popup.addItemWithTitle(&NSString::from_str(title));
+            }
+            iv.saved_popup.setEnabled(!now.is_empty());
+            if let Some(i) = now.iter().position(|d| d.0 == selected) {
+                iv.saved_popup.selectItemAtIndex((i + 1) as isize);
+            }
+            *iv.shown_devices.borrow_mut() = now;
+            self.refresh_permissions();
         }
     }
 
@@ -412,7 +642,25 @@ impl SettingsController {
         iv.pair_button
             .setEnabled(!pairing && self.selected_peer().is_some());
         iv.unpair_button
-            .setEnabled(!pairing && load_config().is_complete());
+            .setEnabled(!pairing && self.selected_device().is_some());
+        iv.connect_button.setEnabled(
+            !pairing
+                && self
+                    .selected_device()
+                    .is_some_and(|id| id != load_config().active_device_id),
+        );
+        let cfg = load_config();
+        iv.open_button.setEnabled(
+            !pairing
+                && self.selected_device().as_deref() == Some(cfg.active_device_id.as_str())
+                && cfg.active_device().is_some_and(|d| d.permissions.screen),
+        );
+        for check in [&iv.screen_check, &iv.input_check, &iv.clipboard_check] {
+            let cfg = load_config();
+            let selected = self.selected_device();
+            let android = cfg.devices.iter().any(|d| Some(&d.id) == selected.as_ref() && d.is_android());
+            check.setEnabled(!pairing && selected.is_some() && !(std::ptr::eq(&**check, &*iv.clipboard_check) && android));
+        }
     }
 
     /// True once the browse has run long enough with nothing to show that
@@ -424,13 +672,39 @@ impl SettingsController {
     /// The line under the popup: what to do next, or why there is nothing to do.
     fn refresh_hint(&self) {
         let iv = self.ivars();
-        let text = if self.discovery_stalled() {
-            "Nothing is answering on this network."
+        let cfg = load_config();
+        let selected = self.selected_device();
+        let caps = cfg
+            .devices
+            .iter()
+            .find(|d| Some(&d.id) == selected.as_ref())
+            .and_then(|d| d.capabilities.as_ref());
+        let android = cfg.devices.iter().any(|d| Some(&d.id) == selected.as_ref() && d.is_android());
+        let text = if android {
+            "Android: Ekranı Aç · giriş izni kapalıysa yalnız izleme · otomatik pano kapalı.".to_string()
+        } else if let Some(caps) = caps {
+            let mut functions = Vec::new();
+            if caps.capture_screen && caps.encode_h264 {
+                functions.push("ekran");
+            }
+            if caps.receive_input {
+                functions.push("klavye/fare");
+            }
+            if caps.clipboard {
+                functions.push("pano");
+            }
+            if functions.is_empty() {
+                "Cihaz ekran, giriş veya pano desteği bildirmedi.".to_string()
+            } else {
+                format!("Cihazın bildirdiği işlevler: {}", functions.join(", "))
+            }
+        } else if self.discovery_stalled() {
+            "Nothing is answering on this network.".to_string()
         } else {
-            "Pick your PC, then click Allow on it."
+            "Compare all 8 fingerprint groups on both devices before Allow.".to_string()
         };
         if iv.hint_label.stringValue().to_string() != text {
-            iv.hint_label.setStringValue(&NSString::from_str(text));
+            iv.hint_label.setStringValue(&NSString::from_str(&text));
         }
     }
 
@@ -458,7 +732,7 @@ impl SettingsController {
     }
 
     /// Drive the status line. Pairing progress outranks the connection state:
-    /// while a request is in flight, "Confirm on DESKTOP-ABC — code 482 913" is
+    /// while a request is in flight, the complete pairing fingerprint is
     /// the only thing the user needs, and the background reconnect loop would
     /// otherwise keep overwriting it with "No connection".
     fn refresh_status(&self) {
@@ -478,7 +752,11 @@ impl SettingsController {
                     deadline,
                 } => {
                     let left = deadline.saturating_duration_since(Instant::now()).as_secs();
-                    Some(format!("{peer}: compare code {code}, then Allow — {left}s"))
+                    iv.hint_label.setStringValue(&NSString::from_str(&format!(
+                        "{peer}: compare ALL 8 groups below, then Allow ({left}s)")));
+                    // Keep the complete fingerprint visible; names/countdowns
+                    // must never truncate the security comparison in this label.
+                    Some(code.clone())
                 }
                 PairState::Finished { text, until } => {
                     if Instant::now() < *until {
@@ -506,6 +784,11 @@ impl SettingsController {
             }
             iv.status_hold.set(None);
         }
+        if load_config().android_selected() {
+            let status = crate::android::status();
+            iv.status_label.setStringValue(&NSString::from_str(if status.message.is_empty() { "Android seçildi — Ekranı Aç" } else { &status.message }));
+            return;
+        }
         let Some(src) = CONN_STATUS.get() else { return };
         let conn = ConnStatus::from_u8(src.load(Ordering::Relaxed));
         // A stalled browse outranks the connection line. "No connection —
@@ -513,7 +796,7 @@ impl SettingsController {
         // cannot be established while the real problem is that the user has no
         // way to pick a PC in the first place. Say the thing they can act on.
         let text = if conn != ConnStatus::Connected && self.discovery_stalled() {
-            "No PCs found — check Privacy & Security \u{203A} Local Network."
+            "No devices found — check Privacy & Security \u{203A} Local Network."
         } else {
             conn_status_text(conn)
         };
@@ -537,7 +820,7 @@ impl SettingsController {
         // is the only signal the user gets.
         if now.is_empty() {
             let want = if self.discovery_stalled() {
-                "No PCs found"
+                "No devices found"
             } else {
                 "Searching your network…"
             };
@@ -580,6 +863,154 @@ impl SettingsController {
         }
         *iv.shown_peers.borrow_mut() = now;
     }
+}
+
+/// Main-thread integration check with an isolated config and hidden controls.
+/// Does not discover devices, request OS permissions, capture or inject input.
+#[cfg(debug_assertions)]
+pub fn check_devices() -> std::io::Result<()> {
+    use protocol::{
+        config::Config,
+        devices::{PairedDevice, Platform},
+    };
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| std::io::Error::other("AppKit requires main thread"))?;
+    let _app = NSApplication::sharedApplication(mtm);
+    let dir = std::env::temp_dir().join(format!(
+        "keyboard-it-ui-{}",
+        protocol::secure::generate_key()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    let previous = std::env::var_os("KEYBOARD_IT_CONFIG");
+    struct Cleanup(std::path::PathBuf, Option<std::ffi::OsString>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Some(value) = &self.1 {
+                std::env::set_var("KEYBOARD_IT_CONFIG", value);
+            } else {
+                std::env::remove_var("KEYBOARD_IT_CONFIG");
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(dir.clone(), previous);
+    std::env::set_var("KEYBOARD_IT_CONFIG", dir.join("config.toml"));
+    let mut cfg = Config::default();
+    for id in ["a", "b"] {
+        let capabilities = (id == "b").then(|| {
+            let mut caps = protocol::capabilities::Capabilities::host(Platform::Windows);
+            caps.receive_input = false;
+            caps.clipboard = false;
+            caps
+        });
+        cfg.remember_device(PairedDevice {
+            transport: Default::default(),
+            capabilities,
+            id: id.into(),
+            name: format!("Test PC {id}"),
+            platform: Platform::Windows,
+            permissions: Default::default(),
+            peer_device_id: id.into(),
+            shared_secret: format!("test-key-{id}"),
+            host: format!("{id}.invalid"),
+            ip: String::new(),
+            port: 5599,
+            desktop_port: 5601,
+        })?;
+    }
+    cfg.save()?;
+    let controller = SettingsController::create(mtm, false);
+    controller.load_fields_from_config();
+    let iv = controller.ivars();
+    assert!(!iv.window.isVisible());
+    assert_eq!(iv.saved_popup.numberOfItems(), 3);
+    // A clipped fingerprint silently weakens human verification. Exercise the
+    // actual native label with the widest hexadecimal glyphs, not a mock view.
+    let fingerprint = protocol::pairing::code_display(&"D".repeat(64));
+    *iv.pair_state.lock().unwrap() = PairState::AwaitingApproval {
+        peer: "Fixture PC".into(), code: fingerprint.clone(),
+        deadline: Instant::now() + Duration::from_secs(120),
+    };
+    controller.refresh_status();
+    assert_eq!(iv.status_label.stringValue().to_string(), fingerprint);
+    let needed: NSSize = unsafe { msg_send![&*iv.status_label, intrinsicContentSize] };
+    assert!(needed.width <= iv.status_label.frame().size.width,
+        "pairing fingerprint would be clipped: {} > {}", needed.width, iv.status_label.frame().size.width);
+    *iv.pair_state.lock().unwrap() = PairState::Idle;
+    assert_eq!(controller.selected_device().as_deref(), Some("a"));
+    iv.saved_popup.selectItemAtIndex(2);
+    controller.savedSelected(sel!(savedSelected:), None);
+    assert_eq!(controller.selected_device().as_deref(), Some("b"));
+    let hint = iv.hint_label.stringValue().to_string();
+    assert!(hint.contains("ekran") && !hint.contains("klavye/fare") && !hint.contains("pano"));
+    assert!(iv.connect_button.isEnabled());
+    assert!(!iv.open_button.isEnabled());
+    crate::capture::CONFIG_DIRTY.store(false, Ordering::SeqCst);
+    unsafe {
+        let _: () = msg_send![&*iv.clipboard_check, setState: 0isize];
+    }
+    controller.changePermissions(sel!(changePermissions:), None);
+    assert!(!crate::capture::CONFIG_DIRTY.load(Ordering::SeqCst));
+    assert!(
+        !Config::load()?
+            .unwrap()
+            .devices
+            .iter()
+            .find(|d| d.id == "b")
+            .unwrap()
+            .permissions
+            .clipboard
+    );
+    controller.unpair(sel!(unpair:), None); // inactive target: exercises actual persistence and UI refresh
+    assert!(!crate::capture::CONFIG_DIRTY.load(Ordering::SeqCst));
+    assert_eq!(Config::load()?.unwrap().active_device_id, "a");
+    assert_eq!(iv.saved_popup.numberOfItems(), 2);
+    // Android setup and registry selection are tested without running adb/scrcpy.
+    crate::android::check_setup(mtm);
+    Config::transaction(|c| {
+        c.remember_device(PairedDevice {
+            transport: protocol::devices::DeviceTransport::Adb { serial: "fixture-android".into(), android_id: "1234567890abcdef".into() },
+            capabilities: None, id: "android".into(), name: "Test Android".into(), platform: Platform::Android,
+            permissions: protocol::devices::Permissions { screen: true, input: false, clipboard: false },
+            peer_device_id: String::new(), shared_secret: String::new(), host: String::new(), ip: String::new(), port: 5599, desktop_port: 5601,
+        })?;
+        Ok(())
+    })?;
+    controller.refresh_saved();
+    iv.saved_popup.selectItemAtIndex(2);
+    controller.savedSelected(sel!(savedSelected:), None);
+    assert!(!iv.clipboard_check.isEnabled());
+    controller.connectSaved(sel!(connectSaved:), None);
+    let android = Config::load()?.unwrap();
+    assert!(android.android_selected() && android.shared_secret.is_empty() && android.peer_addrs().is_empty());
+    assert!(crate::android::SELECTED.load(Ordering::SeqCst));
+    assert!(!crate::android::status().running);
+    controller.refresh_buttons();
+    assert!(iv.open_button.isEnabled());
+    Config::transaction(|c| {
+        c.devices.iter_mut().find(|d| d.id == "android").unwrap().permissions.screen = false;
+        Ok(())
+    })?;
+    controller.refresh_buttons();
+    assert!(!iv.open_button.isEnabled());
+    for control in [
+        &iv.connect_button,
+        &iv.open_button,
+        &iv.pair_button,
+        &iv.unpair_button,
+        &iv.screen_check,
+        &iv.input_check,
+        &iv.clipboard_check,
+    ] {
+        let frame = control.frame();
+        assert!(frame.origin.x >= 0.0 && frame.origin.y >= 0.0);
+        assert!(
+            frame.origin.x + frame.size.width <= 640.0
+                && frame.origin.y + frame.size.height <= 360.0
+        );
+    }
+    println!("Devices UI check passed (two PCs and Android setup/selection; no network, ADB or physical input)");
+    Ok(())
 }
 
 // The Edit menu that used to live here existed solely so Cmd+V worked in the
@@ -665,19 +1096,25 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
         let asked_at_cb = asked_at.clone();
         // Show the handshake-derived comparison code during the one-time
         // approval, and extend the socket deadline while the user checks it.
-        let result = protocol::pairing::pair_initiator(&mut stream, &name, |code| {
-            if let Some(c) = &ctl {
-                let _ = c.set_read_timeout(Some(PAIR_DECISION_WAIT));
-            }
-            if let Ok(mut g) = asked_at_cb.lock() {
-                *g = Some(Instant::now());
-            }
-            set(PairState::AwaitingApproval {
-                peer: peer.name.clone(),
-                code: protocol::pairing::code_display(code),
-                deadline: Instant::now() + protocol::PAIR_DECISION_TIMEOUT,
-            });
-        });
+        let identity = load_config().device_id;
+        let result = protocol::pairing::pair_initiator_with_identity(
+            &mut stream,
+            &name,
+            &identity,
+            |code| {
+                if let Some(c) = &ctl {
+                    let _ = c.set_read_timeout(Some(PAIR_DECISION_WAIT));
+                }
+                if let Ok(mut g) = asked_at_cb.lock() {
+                    *g = Some(Instant::now());
+                }
+                set(PairState::AwaitingApproval {
+                    peer: peer.name.clone(),
+                    code: protocol::pairing::code_display(code),
+                    deadline: Instant::now() + protocol::PAIR_DECISION_TIMEOUT,
+                });
+            },
+        );
 
         let outcome = match result {
             Ok(o) => o,
@@ -706,33 +1143,53 @@ fn spawn_pairing(peer: DiscoveredPeer, state: Arc<Mutex<PairState>>) {
             }
         };
 
-        // Load-then-mutate: never rebuild the struct, or fields this window does
-        // not know about are silently dropped.
-        let mut cfg = load_config();
-        cfg.role = protocol::config::Role::Sender;
-        cfg.shared_secret = outcome.secret;
-        cfg.peer_device_id.clear();
-        cfg.desktop_port = peer.desktop_port.unwrap_or(protocol::desktop::DEFAULT_PORT);
-        cfg.port = outcome.session_port;
-        // Prefer the mDNS name — it follows the PC to a new IP.
-        cfg.peer_host = if peer.hostname.is_empty() {
+        let host = if peer.hostname.is_empty() {
             peer.host.clone()
         } else {
             peer.hostname.clone()
         };
-        cfg.peer_ip = peer.host.clone();
-        if let Err(e) = cfg.save() {
-            done(
-                format!("Paired, but the settings could not be saved: {e}"),
-                10,
-            );
-            return;
-        }
+        let result = protocol::config::Config::transaction(|cfg| {
+            let previous_target = cfg.session_target();
+            cfg.role = protocol::config::Role::Sender;
+            cfg.remember_device(protocol::devices::PairedDevice {
+                transport: Default::default(),
+                capabilities: None,
+                id: String::new(),
+                name: outcome.peer_name.clone(),
+                platform: protocol::devices::Platform::Unknown,
+                permissions: Default::default(),
+                // Identity comes from the approved encrypted pairing, never mDNS.
+                peer_device_id: outcome.peer_device_id,
+                shared_secret: outcome.secret,
+                host,
+                ip: peer.host.clone(),
+                port: outcome.session_port,
+                desktop_port: peer.desktop_port.unwrap_or(protocol::desktop::DEFAULT_PORT),
+            })?;
+            Ok(cfg.session_target() != previous_target)
+        });
+        let changed_target = match result {
+            Ok(changed) => changed,
+            Err(e) => {
+                done(
+                    format!("Paired, but the settings could not be saved: {e}"),
+                    10,
+                );
+                return;
+            }
+        };
         // The connection thread polls this (~1 s) and reconnects with the new
         // key and address — no restart.
-        crate::capture::CONFIG_DIRTY.store(true, Ordering::Relaxed);
+        if changed_target {
+            crate::capture::release_input();
+            crate::desktop::shared().invalidate_target();
+            crate::capture::CONFIG_DIRTY.store(true, Ordering::SeqCst);
+        }
         done(
-            format!("Paired with {} — connecting…", outcome.peer_name),
+            format!(
+                "{} kaydedildi. Cihazlarım listesinden seçebilirsiniz.",
+                outcome.peer_name
+            ),
             5,
         );
     });

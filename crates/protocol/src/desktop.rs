@@ -43,6 +43,7 @@ impl Display {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
+    Capabilities(crate::capabilities::Capabilities),
     Hello {
         version: u8,
         device_id: String,
@@ -93,6 +94,10 @@ impl Message {
     pub fn encode(&self) -> io::Result<Vec<u8>> {
         let mut b = Vec::new();
         match self {
+            Self::Capabilities(c) => {
+                b.push(14);
+                b.extend(c.encode());
+            }
             Self::Hello { version, device_id } => {
                 b.extend([0, *version]);
                 b.extend(device_id.as_bytes());
@@ -193,6 +198,7 @@ impl Message {
         let u32_at = |i| u32::from_be_bytes(p[i..i + 4].try_into().unwrap());
         let u64_at = |i| u64::from_be_bytes(p[i..i + 8].try_into().unwrap());
         Ok(match b[0] {
+            14 => Self::Capabilities(crate::capabilities::Capabilities::decode(p)?),
             0 if p.len() >= 2 && p.len() <= 129 => Self::Hello {
                 version: p[0],
                 device_id: std::str::from_utf8(&p[1..])
@@ -404,26 +410,88 @@ pub struct Channel {
     pub reader: Reader,
     pub writer: Writer,
     pub shutdown: TcpStream,
+    pub peer_capabilities: Option<crate::capabilities::Capabilities>,
+    pub negotiated: crate::capabilities::SessionCapabilities,
 }
 impl Channel {
+    fn prepare(stream: &TcpStream) -> io::Result<()> {
+        stream.set_nonblocking(false)?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        stream.set_write_timeout(Some(TIMEOUT))
+    }
+
+    /// Compatibility entry point: no optional records are emitted.
     pub fn connect(
         mut stream: TcpStream,
         psk: &[u8; 32],
         id: &str,
         initiator: bool,
     ) -> io::Result<(Self, String)> {
-        // Accepted sockets may inherit the listener's nonblocking flag (BSD /
-        // Winsock). Framed handshake reads require blocking I/O with deadlines.
-        stream.set_nonblocking(false)?;
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(TIMEOUT))?;
-        stream.set_write_timeout(Some(TIMEOUT))?;
+        Self::prepare(&stream)?;
         let psk = desktop_psk(psk);
         let transport = if initiator {
             crate::secure::handshake_initiator(&mut stream, &psk)?
         } else {
             crate::secure::handshake_responder(&mut stream, &psk)?
         };
+        Self::finish(stream, transport, id, initiator, None)
+    }
+
+    pub fn connect_with_capabilities(
+        mut stream: TcpStream,
+        psk: &[u8; 32],
+        id: &str,
+        local: &crate::capabilities::Capabilities,
+    ) -> io::Result<(Self, String)> {
+        Self::prepare(&stream)?;
+        let (transport, features) = crate::secure::handshake_initiator_with_features(
+            &mut stream,
+            &desktop_psk(psk),
+            crate::secure::FEATURE_CAPABILITIES,
+        )?;
+        Self::finish(
+            stream,
+            transport,
+            id,
+            true,
+            (features & crate::secure::FEATURE_CAPABILITIES != 0).then_some(local),
+        )
+    }
+
+    /// The returned key index is authenticated, but its authorization may have
+    /// changed during I/O. AccessStore::attach must succeed before acquiring input.
+    pub fn accept(
+        mut stream: TcpStream,
+        psks: &[[u8; 32]],
+        id: &str,
+        local: &crate::capabilities::Capabilities,
+    ) -> io::Result<(Self, String, usize)> {
+        Self::prepare(&stream)?;
+        let keys: Vec<_> = psks.iter().map(desktop_psk).collect();
+        let (transport, index, features) = crate::secure::handshake_responder_many(
+            &mut stream,
+            &keys,
+            crate::secure::FEATURE_CAPABILITIES,
+        )?;
+        let (channel, peer) = Self::finish(
+            stream,
+            transport,
+            id,
+            false,
+            (features & crate::secure::FEATURE_CAPABILITIES != 0).then_some(local),
+        )?;
+        Ok((channel, peer, index))
+    }
+
+    fn finish(
+        stream: TcpStream,
+        transport: snow::TransportState,
+        id: &str,
+        initiator: bool,
+        local: Option<&crate::capabilities::Capabilities>,
+    ) -> io::Result<(Self, String)> {
+        use crate::capabilities::SessionCapabilities;
         let crypto = Arc::new(Mutex::new(transport));
         let mut c = Self {
             reader: Reader {
@@ -435,19 +503,35 @@ impl Channel {
                 crypto,
             },
             shutdown: stream,
+            peer_capabilities: None,
+            negotiated: SessionCapabilities::LEGACY,
         };
         c.writer.send(&Message::Hello {
             version: VERSION,
             device_id: id.into(),
         })?;
-        match c.reader.recv()? {
+        let peer = match c.reader.recv()? {
             Message::Hello { version, device_id }
                 if version == VERSION && !device_id.is_empty() =>
             {
-                Ok((c, device_id))
+                device_id
             }
-            _ => Err(invalid("desktop version mismatch — update both apps")),
+            _ => return Err(invalid("desktop version mismatch — update both apps")),
+        };
+        if let Some(local) = local {
+            c.writer.send(&Message::Capabilities(local.clone()))?;
+            let remote = match c.reader.recv()? {
+                Message::Capabilities(caps) => caps,
+                _ => return Err(invalid("Expected authenticated endpoint capabilities")),
+            };
+            c.negotiated = if initiator {
+                SessionCapabilities::negotiate(local, &remote)
+            } else {
+                SessionCapabilities::negotiate(&remote, local)
+            };
+            c.peer_capabilities = Some(remote);
         }
+        Ok((c, peer))
     }
 }
 impl Reader {

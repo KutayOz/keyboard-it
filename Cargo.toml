@@ -2,14 +2,16 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/android-adapter",
+    "crates/device-host",
     "crates/mac-sender",
     "crates/win-receiver",
 ]
 
-# Single source of version truth: all three crates inherit it (version.workspace = true),
+# Single source of version truth: all crates inherit it (version.workspace = true),
 # so the dmg (mac) and msi (win) versions can never drift apart.
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 
 # Small single-file release exe for distribution (goes into the .msi).
 # Note: opt-level/lto affect the whole workspace (mac-sender included). panic="abort"

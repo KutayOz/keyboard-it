@@ -10,12 +10,12 @@
 //! against a passive eavesdropper, but not against someone actively sitting in
 //! the middle relaying both halves.
 //!
-//! The user closes that hole. Both sides derive a 6-digit code from the Noise
-//! handshake hash, which commits to both ephemeral public keys. A man in the
-//! middle has to run two separate handshakes, so it cannot make both codes come
-//! out the same: the receiver's "Allow" dialog shows a code that would not match
-//! the one on the sender's screen. One click both authorizes the pairing and
-//! confirms the channel.
+//! The user authenticates the channel by comparing the entire 256-bit handshake
+//! fingerprint on both screens before approving. A short decimal truncation of
+//! an uncommitted NN transcript permits offline candidate grinding by an active
+//! intermediary; using the full digest avoids that small search space. This is
+//! channel verification, not automatic identity verification: skipping the
+//! comparison still permits an active intermediary to obtain the pairing key.
 //!
 //! Wire (all frames use secure.rs's 4-byte big-endian length prefix):
 //! ```text
@@ -39,7 +39,9 @@ use crate::secure::{read_frame, write_frame};
 
 /// Pairing wire version. Independent of `secure::PROTOCOL_VERSION`: the session
 /// format and the pairing format can move separately.
-pub const PAIRING_VERSION: u8 = 1;
+// Version 1 used a six-digit truncation. Never silently negotiate down to it.
+// Stored session credentials and input/desktop wire versions remain unchanged.
+pub const PAIRING_VERSION: u8 = 2;
 
 /// No PSK and no static keys — the whole point is that nothing is shared yet.
 const NOISE_PARAMS: &str = "Noise_NN_25519_ChaChaPoly_BLAKE2s";
@@ -78,11 +80,14 @@ fn version_mismatch(peer: u8) -> io::Error {
 /// screen.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PairRequest {
+    /// Optional stable identity from new controllers. Binding to a credential
+    /// happens only after the user confirms the handshake code.
+    pub device_id: String,
     /// The initiator's self-reported device name. UNTRUSTED text from the
     /// network — already sanitized to printable characters by `pair_responder`,
     /// but still chosen by the peer, so never treat it as an identity.
     pub peer_name: String,
-    /// 6 decimal digits, e.g. "482913".
+    /// Full 256-bit uppercase hexadecimal fingerprint (64 characters).
     pub code: String,
 }
 
@@ -97,38 +102,35 @@ pub enum PairDecision {
 /// What the sender walks away with: everything needed to open a session.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PairOutcome {
+    /// Receiver identity authenticated by the user-confirmed pairing channel.
+    /// Empty for older receivers; those are pinned by the first desktop Hello.
+    pub peer_device_id: String,
     /// The receiver's pairing key, to be stored in `Config::shared_secret`.
     pub secret: String,
     /// The port the receiver's SESSION listener is on (not the pairing port).
     pub session_port: u16,
     /// The receiver's display name, for the UI.
     pub peer_name: String,
-    /// The 6-digit code that was shown to the user.
+    /// The full fingerprint that was shown to the user.
     pub code: String,
 }
 
-/// Render a code for humans: "482913" -> "482 913". Easier to read aloud and to
-/// compare across two screens.
+/// Group the fingerprint into eight blocks of eight hex characters. Every
+/// block must be compared; checking only its beginning defeats authentication.
 pub fn code_display(code: &str) -> String {
-    match code.split_at_checked(3) {
-        Some((a, b)) => format!("{a} {b}"),
-        None => code.to_string(),
-    }
+    code.as_bytes().chunks(8)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect::<Vec<_>>().join(" ")
 }
 
-/// Derive the short authentication string from the Noise handshake hash.
-///
-/// The hash commits to both ephemeral public keys and every payload exchanged,
-/// so two independent handshakes (which is what a man in the middle is forced
-/// to run) cannot agree on it.
+/// Bind human verification to the complete Noise transcript, with no decimal
+/// truncation. Independent attacker-controlled sessions must match all 256 bits.
 fn sas_from_hash(h: &[u8]) -> String {
     use blake2::{Blake2s256, Digest};
     let mut d = Blake2s256::new();
-    d.update(b"keyboard-it sas v1\0");
+    d.update(b"keyboard-it pairing fingerprint v2\0");
     d.update(h);
-    let out = d.finalize();
-    let n = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) % 1_000_000;
-    format!("{n:06}")
+    d.finalize().iter().map(|b| format!("{b:02X}")).collect()
 }
 
 /// Clamp a network-supplied device name to something safe to put in a dialog:
@@ -163,7 +165,9 @@ fn push_str(buf: &mut Vec<u8>, s: &str) {
 
 /// Read a length-prefixed string, advancing `rest`.
 fn take_str(rest: &mut &[u8], what: &str) -> io::Result<String> {
-    let (&len, tail) = rest.split_first().ok_or_else(|| bad_data(&format!("truncated {what}")))?;
+    let (&len, tail) = rest
+        .split_first()
+        .ok_or_else(|| bad_data(&format!("truncated {what}")))?;
     let len = len as usize;
     if tail.len() < len {
         return Err(bad_data(&format!("truncated {what}")));
@@ -189,18 +193,29 @@ fn recv_msg<S: Read>(
     t.read_message(&ct[..n], out).map_err(noise_err)
 }
 
-/// Sender side (TCP client). Runs the NN handshake, reports the 6-digit code
+/// Sender side (TCP client). Runs the NN handshake, reports the full fingerprint
 /// through `on_code` so the UI can show it while the user walks to the other
 /// machine, then BLOCKS until the receiver answers.
 ///
 /// A decline comes back as `ErrorKind::PermissionDenied`. Give the socket a read
-/// timeout long enough to cover a human decision (the receiver auto-declines at
-/// 60 s, so ~90 s is the natural choice).
+/// timeout longer than PAIR_DECISION_TIMEOUT to cover a human decision plus I/O.
 pub fn pair_initiator<S: Read + Write>(
     s: &mut S,
     my_name: &str,
     on_code: impl FnOnce(&str),
 ) -> io::Result<PairOutcome> {
+    pair_initiator_with_identity(s, my_name, "", on_code)
+}
+
+pub fn pair_initiator_with_identity<S: Read + Write>(
+    s: &mut S,
+    my_name: &str,
+    device_id: &str,
+    on_code: impl FnOnce(&str),
+) -> io::Result<PairOutcome> {
+    if device_id.len() > 128 || device_id.chars().any(char::is_control) {
+        return Err(bad_data("invalid controller identity"));
+    }
     let mut hs = snow::Builder::new(NOISE_PARAMS.parse().map_err(noise_err)?)
         .build_initiator()
         .map_err(noise_err)?;
@@ -208,7 +223,9 @@ pub fn pair_initiator<S: Read + Write>(
 
     // -> e  (message 1). NN has no key material yet, so this payload travels in
     // the clear; it carries nothing but the version.
-    let n = hs.write_message(&[PAIRING_VERSION], &mut buf).map_err(noise_err)?;
+    let n = hs
+        .write_message(&[PAIRING_VERSION], &mut buf)
+        .map_err(noise_err)?;
     write_frame(s, &buf[..n])?;
 
     // <- e, ee  (message 2), now encrypted.
@@ -242,6 +259,9 @@ pub fn pair_initiator<S: Read + Write>(
 
     let mut hello = Vec::with_capacity(1 + my_name.len());
     push_str(&mut hello, &sanitize_name(my_name));
+    if !device_id.is_empty() {
+        push_str(&mut hello, device_id);
+    }
     send_msg(&mut t, s, &hello)?;
 
     let mut out = [0u8; MAX_MSG];
@@ -255,7 +275,9 @@ pub fn pair_initiator<S: Read + Write>(
         _ => e,
     })?;
     let mut rest = &out[..n];
-    let (&status, tail) = rest.split_first().ok_or_else(|| bad_data("empty pairing result"))?;
+    let (&status, tail) = rest
+        .split_first()
+        .ok_or_else(|| bad_data("empty pairing result"))?;
     rest = tail;
     if status == RESULT_DECLINED {
         return Err(io::Error::new(
@@ -280,8 +302,25 @@ pub fn pair_initiator<S: Read + Write>(
         return Err(bad_data("the PC sent an invalid session port"));
     }
     let peer_name = sanitize_name(&take_str(&mut rest, "PC name")?);
+    let peer_device_id = if rest.is_empty() {
+        String::new()
+    } else {
+        take_str(&mut rest, "receiver identity")?
+    };
+    if peer_device_id.len() > 128
+        || peer_device_id.chars().any(char::is_control)
+        || !rest.is_empty()
+    {
+        return Err(bad_data("invalid receiver identity"));
+    }
 
-    Ok(PairOutcome { secret, session_port, peer_name, code })
+    Ok(PairOutcome {
+        secret,
+        session_port,
+        peer_name,
+        code,
+        peer_device_id,
+    })
 }
 
 /// Receiver side (TCP server). Runs the NN handshake, reads the sender's name,
@@ -299,6 +338,32 @@ pub fn pair_responder<S: Read + Write>(
     my_name: &str,
     decide: impl FnOnce(&PairRequest) -> bool,
 ) -> io::Result<PairDecision> {
+    pair_responder_authorized(s, session_port, my_name, |req| {
+        Ok(decide(req).then(|| secret.to_string()))
+    })
+}
+
+/// The callback both asks for consent and persists an individual credential.
+/// Persistence errors occur before any accepted result/key is sent.
+pub fn pair_responder_authorized<S: Read + Write>(
+    s: &mut S,
+    session_port: u16,
+    my_name: &str,
+    authorize: impl FnOnce(&PairRequest) -> io::Result<Option<String>>,
+) -> io::Result<PairDecision> {
+    pair_responder_authorized_with_identity(s, session_port, my_name, "", authorize)
+}
+
+pub fn pair_responder_authorized_with_identity<S: Read + Write>(
+    s: &mut S,
+    session_port: u16,
+    my_name: &str,
+    device_id: &str,
+    authorize: impl FnOnce(&PairRequest) -> io::Result<Option<String>>,
+) -> io::Result<PairDecision> {
+    if device_id.len() > 128 || device_id.chars().any(char::is_control) {
+        return Err(bad_data("invalid receiver identity"));
+    }
     let mut hs = snow::Builder::new(NOISE_PARAMS.parse().map_err(noise_err)?)
         .build_responder()
         .map_err(noise_err)?;
@@ -312,7 +377,9 @@ pub fn pair_responder<S: Read + Write>(
 
     // Answer even on a mismatch, so the peer can report the real reason instead
     // of a bare connection drop; then fail.
-    let n = hs.write_message(&[PAIRING_VERSION], &mut buf).map_err(noise_err)?;
+    let n = hs
+        .write_message(&[PAIRING_VERSION], &mut buf)
+        .map_err(noise_err)?;
     write_frame(s, &buf[..n])?;
     if peer_ver != PAIRING_VERSION {
         return Err(version_mismatch(peer_ver));
@@ -325,20 +392,39 @@ pub fn pair_responder<S: Read + Write>(
     let n = recv_msg(&mut t, s, &mut out)?;
     let mut rest = &out[..n];
     let peer_name = sanitize_name(&take_str(&mut rest, "device name")?);
-    let req = PairRequest { peer_name, code };
+    let controller_id = if rest.is_empty() {
+        String::new()
+    } else {
+        take_str(&mut rest, "controller identity")?
+    };
+    if controller_id.len() > 128 || controller_id.chars().any(char::is_control) || !rest.is_empty()
+    {
+        return Err(bad_data("invalid controller identity"));
+    }
+    let req = PairRequest {
+        peer_name,
+        code,
+        device_id: controller_id,
+    };
 
-    if !decide(&req) {
+    let Some(secret) = authorize(&req)? else {
         // Best-effort: the peer may already be gone, and a decline is not a
         // failure of ours to report.
         let _ = send_msg(&mut t, s, &[RESULT_DECLINED]);
         return Ok(PairDecision::Declined(req));
+    };
+    if secret.is_empty() || secret.len() > 255 {
+        return Err(bad_data("invalid pairing key"));
     }
 
     let mut msg = Vec::with_capacity(64 + my_name.len());
     msg.push(RESULT_ACCEPTED);
-    push_str(&mut msg, secret);
+    push_str(&mut msg, &secret);
     msg.extend_from_slice(&session_port.to_be_bytes());
     push_str(&mut msg, &sanitize_name(my_name));
+    if !device_id.is_empty() {
+        push_str(&mut msg, device_id);
+    }
     send_msg(&mut t, s, &msg)?;
 
     Ok(PairDecision::Accepted(req))
@@ -378,7 +464,9 @@ mod tests {
         assert_eq!(outcome.session_port, 5599);
         assert_eq!(outcome.peer_name, "DESKTOP-ABC");
 
-        let PairDecision::Accepted(req) = decision else { panic!("expected Accepted") };
+        let PairDecision::Accepted(req) = decision else {
+            panic!("expected Accepted")
+        };
         assert_eq!(req.peer_name, "Kutay's MacBook");
         // The whole security argument: one code, derived independently on both
         // ends, and the sender's UI saw exactly what it later reports.
@@ -396,7 +484,10 @@ mod tests {
 
         let err = initiator.join().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(err.to_string().contains("declined"), "unexpected message: {err}");
+        assert!(
+            err.to_string().contains("declined"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
@@ -407,7 +498,9 @@ mod tests {
         let initiator = thread::spawn(move || pair_initiator(&mut ci, "Mac", |_| {}).unwrap_err());
 
         // Hand-roll a responder that goes silent instead of answering.
-        let mut hs = snow::Builder::new(NOISE_PARAMS.parse().unwrap()).build_responder().unwrap();
+        let mut hs = snow::Builder::new(NOISE_PARAMS.parse().unwrap())
+            .build_responder()
+            .unwrap();
         let mut buf = [0u8; MAX_HANDSHAKE];
         let n = read_frame(&mut cr, &mut buf).unwrap();
         let mut tmp = [0u8; MAX_HANDSHAKE];
@@ -443,12 +536,15 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("pairing version mismatch"), "got: {err}");
+        assert!(
+            err.to_string().contains("pairing version mismatch"),
+            "got: {err}"
+        );
         initiator.join().unwrap();
     }
 
     #[test]
-    fn code_is_six_digits_and_differs_between_sessions() {
+    fn fingerprint_is_full_length_and_differs_between_sessions() {
         let run = || {
             let (mut ci, mut cr) = socket_pair();
             let initiator =
@@ -459,13 +555,17 @@ mod tests {
         let a = run();
         let b = run();
         for c in [&a, &b] {
-            assert_eq!(c.len(), 6, "code must be 6 digits: {c}");
-            assert!(c.bytes().all(|b| b.is_ascii_digit()), "non-digit in code: {c}");
+            assert_eq!(c.len(), 64, "fingerprint must retain all 256 bits: {c}");
+            assert!(
+                c.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_lowercase()),
+                "invalid fingerprint: {c}"
+            );
         }
-        // Ephemeral keys are fresh per session, so a replayed code is worthless.
-        // This is what stops a relayed handshake from matching.
+        // Fresh ephemeral keys produce independent channel fingerprints.
         assert_ne!(a, b, "two sessions produced the same code");
-        assert_eq!(code_display("482913"), "482 913");
+        assert_eq!(code_display(&"01234567".repeat(8)), vec!["01234567"; 8].join(" "));
+        assert_eq!(code_display(""), "");
+        assert_ne!(sas_from_hash(b"left channel"), sas_from_hash(b"right channel"));
     }
 
     #[test]
@@ -487,7 +587,9 @@ mod tests {
         let initiator = thread::spawn(move || pair_initiator(&mut ci, "Mac", |_| {}).unwrap_err());
 
         // Hand-roll a responder that claims success but sends no payload.
-        let mut hs = snow::Builder::new(NOISE_PARAMS.parse().unwrap()).build_responder().unwrap();
+        let mut hs = snow::Builder::new(NOISE_PARAMS.parse().unwrap())
+            .build_responder()
+            .unwrap();
         let mut buf = [0u8; MAX_HANDSHAKE];
         let n = read_frame(&mut cr, &mut buf).unwrap();
         let mut tmp = [0u8; MAX_HANDSHAKE];

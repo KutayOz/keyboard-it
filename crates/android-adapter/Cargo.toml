@@ -1,0 +1,8 @@
+[package]
+name = "android-adapter"
+version.workspace = true
+edition = "2021"
+description = "Explicit ADB discovery and supervised scrcpy sessions for keyboard-it"
+
+[dependencies]
+protocol = { path = "../protocol" }

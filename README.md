@@ -1,9 +1,10 @@
 # keyboard-it
 
-View and control a Windows PC from your MacBook over the local network.
+Manage paired devices from your MacBook over the local network, with full Windows desktop control and native keyboard/mouse hosts for macOS and Linux X11. Android devices can be added through ADB and opened in a managed scrcpy window.
 
-keyboard-it pairs once, then reconnects automatically when both computers are available.
-Choose **Windows’u Aç** in the Mac menu bar to open the PC's existing desktop in a native
+keyboard-it saves multiple devices, pairs with each once, and reconnects to the selected
+device automatically. Open **Cihazlarım…** in the Mac menu bar to add, select or forget a PC
+and choose its local screen/input/clipboard permissions. Choose **Ekranı Aç** to open its existing desktop in a native
 macOS full-screen Space. Switching to another Space returns keyboard and mouse control to
 the Mac immediately. Text clipboard sharing works in both directions while the Windows
 viewer is focused and can be disabled in the menu.
@@ -17,12 +18,14 @@ The original keyboard/mouse-only workflow remains available as **Yalnız klavye/
 double-tap Fn to switch input between computers. Existing pairings and the legacy input
 protocol remain compatible. Screen sharing requires the updated app on **both** computers.
 
-**Requirements:** same LAN, an awake Windows 10/11 PC with a signed-in user and an active
+**Windows desktop requirements:** same LAN, an awake Windows 10/11 PC with a signed-in user and an active
 connected monitor. This version does not include internet access, headless displays, audio,
 file transfer, or control of the Windows sign-in/UAC secure desktop. Screen streaming
 resumes when the normal desktop becomes available again.
 
 See [Remote desktop setup, architecture and validation](docs/remote-desktop.md).
+See [Android USB/Wi-Fi setup and validation limits](docs/android.md).
+See [Universal devices, access management and validation without physical devices](docs/universal-devices.md).
 
 ## How it works
 
@@ -51,9 +54,10 @@ mDNS browse ──► picks a PC ──► Noise NN (unauthenticated) ──► 
 - The sender reconnects automatically, and the receiver releases held keys when the
   connection drops, so nothing stays stuck on the Windows side.
 
-Workspace crates: `crates/protocol` (wire format, config, Noise handshake),
-`crates/mac-sender` (macOS menu bar app), `crates/win-receiver` (Windows tray app with a
-settings window).
+Workspace crates: `crates/protocol` (wire format, registry and access policy),
+`crates/device-host` (shared host runtime, native input adapters and console host),
+`crates/android-adapter` (explicit ADB discovery/pairing and managed scrcpy sessions),
+`crates/mac-sender` (macOS controller), and `crates/win-receiver` (Windows tray and settings).
 
 ## Install
 
@@ -145,7 +149,7 @@ One thing the app cannot set for you: System Settings → Keyboard → "Press fn
 toggle misfires.
 
 The app lives in the menu bar; its Dock icon appears while the Windows viewer is open: **Permissions** reopens the window above,
-**Settings** opens the settings window, **Start at Login** toggles a LaunchAgent, and
+**Cihazlarım…** opens saved devices and pairing, **Start at Login** toggles a LaunchAgent, and
 **Quit** exits and restores normal cursor behavior.
 
 ### Windows
@@ -155,31 +159,33 @@ The receiver runs in the system tray and starts listening on its own — there i
 configure before pairing. The installer adds its own inbound firewall rule, so no Defender
 prompt should appear; if you installed by copying the `.exe` instead, answer **Allow** to
 the prompt on first launch. Its settings window sets the port, toggles start-at-login, and
-can forget paired Macs.
+lists authorized controllers and can revoke one controller or all access.
 
 ### Pairing
 
 Nothing is typed and no addresses are exchanged. With keyboard-it running on both machines
 and both on the same network:
 
-1. On the Mac, open **Settings** from the menu bar. Your PC appears in the list within a
+1. On the Mac, open **Cihazlarım…** from the menu bar. Your PC appears in the discovery list within a
    few seconds.
 2. Pick it and click **Pair & Connect**.
-3. Compare the short code on both computers. On the PC, approve **Allow** only when the codes match.
+3. Compare **all eight groups of the fingerprint** on both computers. On the PC, approve **Allow** only when every group matches.
 
 That's it — the Mac stores the key the PC hands over and connects within about a second.
 
-Comparing the short code and approving the request is the security check: whoever you
+Comparing the complete fingerprint and approving the request is the security check: whoever you
 allow can type and click on your PC for as long as the pairing lasts. Allow a machine you
 recognise, on a network you trust — see [Security model](#security-model) for what that
 does and does not cover.
 
 Other things worth knowing:
 
-- The PC generates its key by itself on first run; you never see or copy it.
+- Each approved controller receives its own random key, persisted before pairing succeeds; you never copy it.
 - The Mac stores the PC's `.local` name, so the link survives the PC getting a new IP.
-- **Forget paired Macs** in the Windows settings window issues a new key, which locks out
-  every Mac paired so far. **Unpair** on the Mac just forgets the PC locally.
+- **Erişimi kaldır** on Windows revokes one controller and closes its sessions.
+  **Tüm erişimleri kaldır** revokes all access. Earlier pairings that shared one key are
+  shown as a legacy group; re-pair each controller to get separate revocation.
+  **Cihazı Unut** on the Mac forgets only the selected device locally.
 - The PC only accepts one pairing request at a time, declines on its own after two
   minutes, and ignores repeat requests for a few seconds after you decline one. The Mac
   counts that deadline down on screen, so you know how long you have to walk over.
@@ -188,6 +194,20 @@ Other things worth knowing:
   port defaults to `5599`; the pairing listener uses `5600`, or an ephemeral port if that
   one is taken — which is why the installer's firewall rule covers the *program* rather
   than a fixed port.
+
+## Android
+
+Open **Cihazlarım… → Android Ekle…** on the Mac. With ADB and scrcpy installed, refresh
+the list, approve USB debugging on the phone, select a ready device and save it. Then
+select it with **Bu Cihaza Geç** and choose **Ekranı Aç**. The setup window also accepts
+Android wireless debugging's separate pairing address/code and connection address.
+
+The Android viewer is a separate managed scrcpy window. Input can be disabled for
+view-only use; audio and automatic clipboard sync are disabled. Target/permission
+changes and quitting close the owned viewer. Existing computer pairings remain intact.
+USB discovery, saving/selecting a phone, live video and mouse control were validated on
+an SM-G780G running Android 13. Wi-Fi pairing and keyboard behavior still need physical
+validation. See [Android setup and limits](docs/android.md).
 
 ## Build from source
 
@@ -200,13 +220,39 @@ cargo run -p win-receiver    # Windows side
 ```
 
 On a non-Windows host, `win-receiver` prints received events instead of injecting them and
-auto-accepts pairing requests (there is no dialog to confirm in), so the whole network path
-can be exercised on one machine. Both binaries resolve to the same config path, so give
+refuses new pairing requests because it has no consent UI. Use the console host below
+for a locally approved, device-free pairing test. Both binaries resolve to the same config path, so give
 them separate files:
 
 ```sh
 KEYBOARD_IT_CONFIG=/tmp/kbit-receiver.toml cargo run -p win-receiver
 ```
+
+
+### macOS and Linux input hosts
+
+The shared host can also receive keyboard/mouse events on another Mac or Linux X11
+computer. These adapters currently support **input only**; their screen and clipboard
+capabilities are disabled. Native injection has been compiled and tested through
+simulations; physical device validation remains outstanding.
+
+```sh
+cargo run -p device-host --bin keyboard-it-host -- --help
+cargo run -p device-host --bin keyboard-it-host
+# Device-free simulation: no OS input, local pairing consent still required
+cargo run -p device-host --bin keyboard-it-host -- --dry-run --config /tmp/kbit-host.toml
+```
+
+macOS requires Accessibility permission for the host executable. Linux requires an
+active X11 session, libX11, libXtst and XTEST; Wayland is explicitly unsupported.
+The console host uses its own `host.toml` by default, so it can run alongside the Mac
+controller. Pair it from **Cihazlarım…**, compare both codes, then enter `allow CODE`
+in the host console. Enable **Yalnız klavye/fare modu** on the controller and use double Fn.
+
+Console commands: `list`, `revoke ID`, `revoke-all`, `deny`, and `quit`. EOF also stops
+listeners and releases held input. With the host stopped, `--list-controllers`,
+`--revoke ID` and `--revoke-all` manage access offline. Use `--config PATH` for a custom
+config. The console host is built from source; the current DMG/MSI packaging is unchanged.
 
 Packaging:
 
@@ -225,18 +271,23 @@ Built for a trusted home or office LAN, not the open internet.
 
 **Session (port 5599).** Transport is `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s` (the `snow`
 crate). Both sides prove knowledge of a pre-shared key derived from `shared_secret` with
-BLAKE2s; all traffic is encrypted with per-session ephemeral keys. No key, no start; wrong
-key, no connection. The receiver listens on all interfaces and the key is the only gate.
+BLAKE2s; all traffic is encrypted with per-session ephemeral keys. Sessions require an authorized key; wrong
+keys cannot connect. The receiver listens on all IPv4 interfaces. The Windows installer limits its inbound
+rule to the local subnet; the Noise key authenticates peers within that boundary. Legacy
+input ownership transfers only after a valid fresh-session transport record, not merely
+a replayable initial handshake message.
 
 **Pairing (port 5600).** This is where the key comes from, so it cannot use the key. It
 runs `Noise_NN` — ephemeral keys only, no PSK — which is encrypted but *unauthenticated*.
 The gate is consent, not cryptography: no Mac gets a key unless someone at the PC clicks
 **Allow**.
 
-Both screens show a short code derived from the Noise handshake hash. Compare them before
-allowing the request: an active intermediary establishes two different handshakes, so the
-codes will differ. The receiver still requires explicit consent; the discovery name alone
-is never proof of identity.
+Both screens show a full 256-bit fingerprint derived from the Noise handshake hash.
+Compare **all eight groups** before allowing the request. An active intermediary establishes
+separate handshakes; matching their complete fingerprints requires a cryptographic collision.
+Approving without comparison still permits MITM. Pairing v2 refuses the old six-digit scheme;
+update both apps to 0.6.0 for new pairings. Existing saved session keys remain usable.
+See [Security review and regression evidence](docs/security-review.md).
 
 The receiver limits abuse of that dialog: one request at a time, a 10-second I/O timeout, a
 two-minute auto-decline, and a cooldown after a decline. That deadline lives in
@@ -246,16 +297,20 @@ at 60 s while the Mac promised nothing, and a click that arrived at 60.6 s was r
 "approved" on the PC and as a rejection on the Mac.
 
 **Remote desktop (default port 5601).** A separate Noise NNpsk0 channel derives a
-domain-separated key from the existing pairing key and negotiates its own version and device
-identity. Desktop data, input and text clipboard are encrypted. A new connection replaces
+domain-separated key from that controller’s pairing key and negotiates its own version and device
+identity. Updated peers exchange authenticated screen/input/clipboard and codec capabilities;
+older peers retain the original exchange. Desktop data, input and text clipboard are encrypted. A new connection replaces
 an old session only after authentication. Video and clipboard reassembly are bounded.
 
 **Everywhere.**
 
-- The pairing key is stored in plaintext in the local config file (mode 0600 on macOS).
-  Anyone who can read that file can impersonate a peer.
-- One key per PC, shared by every Mac paired to it. "Forget paired Macs" issues a new one
-  and locks all of them out; there is no per-device revocation.
+- Controller keys remain plaintext: the sender config and receiver `*.access.toml` file
+  use mode 0600 on Unix. Anyone who can read them can impersonate an authorized peer.
+- New pairings have individual credentials. Revocation persists before taking effect,
+  closes only that controller’s sockets, and rejects stale authenticated handshakes.
+  The earlier shared key remains a separately revocable legacy group until re-pairing.
+- The receiver locks its access policy for its lifetime. A second process refuses to
+  edit it; manage live access in the running Windows settings or host console.
 - Pairing is offered whenever the receiver is listening. Anyone on your LAN can make the
   dialog appear — they just cannot get past it without someone at the PC clicking Allow.
 - Device names shown in the dialog come from the network. They are stripped of control
@@ -270,3 +325,12 @@ MIT — see [LICENSE](LICENSE).
 ### 0.5.0 görüntü motoru
 
 GPU üzerinde imleç/döndürme/ölçekleme ve NV12 dönüşümü, D3D11 yüzeylerinden donanım kodlama, 60/120 FPS profilleri ve Mac ekranına bağlı görüntü yenilemesi eklendi. Menüdeki **Görüntü kalitesi** ve **Performans bilgilerini göster** seçeneklerini kullanın. Masaüstü için her iki cihazın da 0.5.0 olması gerekir; eşleştirme korunur. Ayrıntılar ve ölçüm sınırları: [Remote desktop](docs/remote-desktop.md).
+
+### 0.6.0 device management and security
+
+Adds Android ADB/scrcpy integration, macOS/Linux X11 input hosts and individual controller
+revocation. Pairing now requires comparing the complete fingerprint (all eight groups),
+and both apps must be 0.6.0 for new pairings. Existing sessions retain their saved keys.
+Fixes a captured-handshake replay that could disconnect the active input controller,
+restricts the Windows firewall exception to the local subnet, and removes diagnostic
+auto-approval. See [security evidence and limits](docs/security-review.md).

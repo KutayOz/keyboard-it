@@ -1,0 +1,37 @@
+[package]
+name = "device-host"
+version.workspace = true
+edition = "2021"
+description = "Shared keyboard-it host runtime and native input adapters"
+
+[[bin]]
+name = "keyboard-it-host"
+path = "src/main.rs"
+
+[dependencies]
+protocol = { path = "../protocol" }
+socket2 = "0.5"
+mdns-sd = "0.20"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Foundation",
+    "Win32_System_Threading",       # encoder events
+    "Win32_System_SystemInformation", # GetLocalTime — wall clock for the pairing trace
+    "Win32_Security",               # event security attributes
+    "Win32_System_Com",             # capture/encoder runtime
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation", "Win32_System_Variant",
+    "Win32_System_DataExchange", "Win32_System_Memory",
+    "Win32_System_Ole", "Win32_Graphics_Gdi",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["highsierra"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2.21"

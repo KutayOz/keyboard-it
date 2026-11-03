@@ -12,15 +12,11 @@ use std::io;
 
 #[cfg(windows)]
 mod autostart;
-mod desktop;
-mod diag;
+use device_host::serve;
+#[cfg(windows)]
+use device_host::{diag, netinfo};
 #[cfg(windows)]
 mod gui;
-mod inject;
-#[cfg(windows)]
-mod netinfo;
-mod scancode;
-mod serve;
 
 fn main() -> io::Result<()> {
     // Do not die silently on a broken config.toml (release builds have no console, so a
@@ -34,28 +30,18 @@ fn main() -> io::Result<()> {
         ),
     };
 
-    // First run: mint a key immediately. Nothing starts without one — not the
-    // listener, and therefore not the mDNS advertisement — so a fresh install
-    // would be invisible on the network and could never be paired with. The user
-    // never sees this value; it exists only to be handed to a Mac during pairing.
-    let cfg_err = if cfg.shared_secret.is_empty() && std::env::var_os("KEYBOARD_IT_KEY").is_none() {
-        cfg.shared_secret = protocol::secure::generate_key();
-        cfg.role = protocol::config::Role::Receiver;
-        match cfg.save() {
-            // A key that cannot be persisted still works for this run, but the
-            // pairing would silently not survive a restart — say so.
-            Err(e) => Some(format!("could not save the pairing key: {e}")),
-            Ok(()) => cfg_err,
-        }
-    } else {
-        cfg_err
-    };
-
+    // New receivers pair with individual keys; no shared key is minted or
+    // handed out. A loaded legacy key remains available through the access policy.
+    let load_failed = cfg_err.is_some();
     cfg.role = protocol::config::Role::Receiver;
     cfg.ensure_identity();
-    let cfg_err = match cfg.save() {
-        Ok(()) => cfg_err,
-        Err(e) => Some(format!("Could not persist device identity/settings: {e}")),
+    let cfg_err = if load_failed {
+        cfg_err
+    } else {
+        match cfg.save() {
+            Ok(()) => cfg_err,
+            Err(e) => Some(format!("Could not persist device identity/settings: {e}")),
+        }
     };
 
     #[cfg(windows)]

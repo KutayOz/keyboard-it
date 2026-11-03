@@ -19,7 +19,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --verbose
+      - name: Virtual X11 input fixture (no physical devices)
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxtst6 libx11-6
+      - run: cargo test --workspace --locked --verbose
+      - name: Native Linux adapter against isolated Xvfb
+        run: env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 KEYBOARD_IT_VIRTUAL_DISPLAY=1 xvfb-run -a cargo test -p device-host --test x11_input --locked -- --ignored
 
   # macOS: release build -> keyboard-it.app -> .dmg (native package.sh).
   macos:
@@ -37,6 +41,8 @@ jobs:
         run: cargo test --workspace --locked
       - name: Native AppKit viewer smoke check (no windows shown)
         run: cargo run -p mac-sender --locked -- --check-viewer
+      - name: Native devices UI with PC and Android fixtures (no device connections)
+        run: cargo run -p mac-sender --locked -- --check-devices
       - name: Package .app + .dmg
         run: bash packaging/mac/package.sh
       - uses: actions/upload-artifact@v4
@@ -83,7 +89,7 @@ jobs:
   # Only on v* tags: attach the installers to a Release.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos, windows]
+    needs: [test, macos, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,14 +99,17 @@ jobs:
           path: artifacts
       # Keep the site's 'releases/latest/download/<fixed-name>' links version-independent:
       # upload fixed-name copies ALONGSIDE the versioned files.
-      - name: Fixed-name copies (for latest/download links)
+      - name: Prepare installers and SHA-256 checksums
         run: |
-          mkdir -p latest
-          cp artifacts/macos-dmg/keyboard-it-*.dmg latest/keyboard-it-macos.dmg
-          cp artifacts/windows-msi/keyboard-it-*-x64.msi latest/keyboard-it-windows-x64.msi
+          mkdir -p release
+          cp artifacts/macos-dmg/keyboard-it-*.dmg release/
+          cp artifacts/windows-msi/keyboard-it-*-x64.msi release/
+          cp release/keyboard-it-*.dmg release/keyboard-it-macos.dmg
+          cp release/keyboard-it-*-x64.msi release/keyboard-it-windows-x64.msi
+          cd release
+          sha256sum *.dmg *.msi > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/*
-            latest/*
+          files: release/*
+          fail_on_unmatched_files: true
           generate_release_notes: true

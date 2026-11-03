@@ -74,7 +74,8 @@ pub fn log(args: std::fmt::Arguments<'_>) {
 }
 
 /// `plog!("...")` — same shape as `println!`, but it survives a release build.
+#[macro_export]
 macro_rules! plog {
     ($($arg:tt)*) => { $crate::diag::log(format_args!($($arg)*)) };
 }
-pub(crate) use plog;
+pub use plog;

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 protocol = { path = "../protocol" }
+android-adapter = { path = "../android-adapter" }
 socket2 = "0.5"   # TCP keepalive — half-open connection detection (net.rs, parity with win-receiver)
 mdns-sd = "0.20"  # browse for the receiver on the LAN — replaces hand-typing the peer IP
 
@@ -18,6 +19,7 @@ objc2-quartz-core = { version = "0.3", features = ["CALayer", "CADisplayLink", "
 objc2-foundation = { version = "0.3", features = ["NSString", "NSNotification", "NSThread", "NSTimer", "NSDate"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
+    "NSSecureTextField",
     "NSResponder",
     "NSStatusBar",
     "NSStatusItem",

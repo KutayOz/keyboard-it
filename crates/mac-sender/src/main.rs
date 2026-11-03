@@ -8,12 +8,15 @@
 //! Usage:
 //!   cargo run -p mac-sender                  # connect to peer_host from config (real capture)
 //!   cargo run -p mac-sender -- <ip|host>     # set and save peer_host, then capture
+//!   cargo run -p mac-sender -- --devices    # open the device manager on launch
 //!   cargo run -p mac-sender -- --hello <ip>  # test: send a fixed 'hello'
 
 mod net;
 
 #[cfg(target_os = "macos")]
 mod autostart;
+#[cfg(target_os = "macos")]
+mod android;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
@@ -75,17 +78,29 @@ fn send_hello(cfg: &Config) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(all(target_os = "macos", debug_assertions))]
+    if args.get(1).map(String::as_str) == Some("--check-devices") {
+        return settings::check_devices();
+    }
+    #[cfg(all(target_os = "macos", debug_assertions))]
     if args.get(1).map(String::as_str) == Some("--check-viewer") {
         return desktop::check_viewer();
     }
     let hello_mode = args.get(1).map(String::as_str) == Some("--hello");
-    let ip_arg = if hello_mode { args.get(2) } else { args.get(1) };
+    let open_devices = args.get(1).map(String::as_str) == Some("--devices");
+    let ip_arg = if open_devices {
+        None
+    } else if hello_mode {
+        args.get(2)
+    } else {
+        args.get(1)
+    };
 
     // Config is the source of truth. An IP given on the CLI updates the config.
     // Do not exit on a missing/broken config: the distributed .app is LSUIElement, so
     // stderr is invisible and the app would look like it never launched. Instead the
     // menu bar still comes up with a 'Setup needed' title, and capture::run points the
     // user to 'Settings...' with a dialog on first launch.
+    let mut config_load_failed = false;
     let mut cfg = match protocol::config::Config::load() {
         Ok(Some(c)) => c,
         Ok(None) => {
@@ -98,6 +113,7 @@ fn main() -> io::Result<()> {
             c
         }
         Err(e) => {
+            config_load_failed = true;
             eprintln!(
                 "failed to read config ({e}) — continuing with defaults; fix via 'Settings...'."
             );
@@ -106,12 +122,16 @@ fn main() -> io::Result<()> {
     };
     cfg.role = Role::Sender;
     cfg.ensure_identity();
-    let _ = cfg.save();
+    if !config_load_failed {
+        let _ = cfg.save();
+    }
     if let Some(ip) = ip_arg {
         cfg.peer_host = ip.clone();
-        let _ = cfg.save(); // so later runs need no argument
+        if !config_load_failed {
+            let _ = cfg.save();
+        } // preserve a damaged registry for recovery
     }
-    if cfg.peer_host.is_empty() {
+    if cfg.peer_host.is_empty() && !cfg.android_selected() {
         // Informational for terminal runs; does not stop the flow.
         eprintln!(
             "peer_host is not set — the menu bar will show 'Setup needed'. Provide the Windows\n  \
@@ -140,7 +160,7 @@ fn main() -> io::Result<()> {
                 return Ok(());
             }
         };
-        capture::run(cfg)
+        capture::run(cfg, open_devices)
     }
     #[cfg(not(target_os = "macos"))]
     {

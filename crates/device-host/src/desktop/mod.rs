@@ -1,5 +1,7 @@
 //! Stoppable desktop listener; unauthenticated sockets never replace live sessions.
 use protocol::{
+    access::AccessStore,
+    capabilities::Capabilities,
     config::Config,
     desktop::{self, Channel, Message},
 };
@@ -39,8 +41,17 @@ impl Drop for Handle {
         }
     }
 }
+#[cfg(all(test, not(windows)))]
 pub fn start(
     cfg: &Config,
+    on_conn: Arc<dyn Fn(crate::serve::ConnStatus) + Send + Sync>,
+) -> io::Result<Handle> {
+    start_with_access(cfg, AccessStore::in_memory(&cfg.shared_secret), on_conn)
+}
+
+pub fn start_with_access(
+    cfg: &Config,
+    access: Arc<AccessStore>,
     on_conn: Arc<dyn Fn(crate::serve::ConnStatus) + Send + Sync>,
 ) -> io::Result<Handle> {
     let listener = TcpListener::bind(("0.0.0.0", cfg.desktop_port))
@@ -67,36 +78,47 @@ pub fn start(
                     let l = l.clone();
                     let pending = pending.clone();
                     let on_conn = on_conn.clone();
+                    let access = access.clone();
                     thread::spawn(move || {
-                        let authenticated = protocol::secure::psk_from_config_or_env(&cfg)
-                            .and_then(|key| Channel::connect(socket, &key, &cfg.device_id, false));
+                        let keys = access.authentication_keys();
+                        let psks: Vec<_> = keys.iter().map(|k| k.key).collect();
+                        let capabilities = host_capabilities();
+                        let authenticated =
+                            Channel::accept(socket, &psks, &cfg.device_id, &capabilities);
                         pending.fetch_sub(1, Ordering::SeqCst);
-                        let (channel, _) = match authenticated {
+                        let (channel, peer_id, key_index) = match authenticated {
                             Ok(v) => v,
                             Err(e) => {
                                 crate::diag::plog!("desktop authentication failed: {e}");
                                 return;
                             }
                         };
+                        if !keys[key_index].device_id.is_empty()
+                            && keys[key_index].device_id != peer_id
+                        {
+                            return;
+                        }
                         // The slot stays locked until ownership has transferred, preventing
                         // the old cleanup from touching keys belonging to this connection.
-                        let generation = {
-                            let mut slot = l.lock().unwrap();
-                            if s.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            if let Some(old) = slot.take() {
-                                desktop::shutdown(&old);
-                            }
-                            let Ok(clone) = channel.shutdown.try_clone() else {
-                                return;
-                            };
-                            *slot = Some(clone);
-                            crate::inject::acquire()
+                        let authorized =
+                            access.attach_with(&keys[key_index], &channel.shutdown, || {
+                                let mut slot = l.lock().unwrap();
+                                if s.load(Ordering::SeqCst) {
+                                    return Err(io::Error::other("Listener stopped"));
+                                }
+                                if let Some(old) = slot.take() {
+                                    desktop::shutdown(&old);
+                                }
+                                let clone = channel.shutdown.try_clone()?;
+                                *slot = Some(clone);
+                                Ok(crate::inject::acquire())
+                            });
+                        let Ok((lease, generation)) = authorized else {
+                            return;
                         };
                         on_conn(crate::serve::ConnStatus::Connected);
                         let socket = channel.shutdown.try_clone().ok();
-                        if let Err(e) = run(channel, &s, generation) {
+                        if let Err(e) = run(channel, &s, generation, lease) {
                             crate::diag::plog!("desktop session ended: {e}");
                         }
                         if crate::inject::owned(generation) {
@@ -123,8 +145,26 @@ pub fn start(
     })
 }
 
+fn host_capabilities() -> Capabilities {
+    #[cfg(windows)]
+    {
+        let mut caps = Capabilities::host(protocol::devices::Platform::Windows);
+        caps.receive_input = crate::inject::capabilities().receive_input;
+        caps
+    }
+    #[cfg(not(windows))]
+    {
+        crate::inject::capabilities()
+    }
+}
+
 #[cfg(windows)]
-fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()> {
+fn run(
+    channel: Channel,
+    stop: &AtomicBool,
+    initial_owner: u64,
+    lease: Arc<protocol::access::SessionLease>,
+) -> io::Result<()> {
     use desktop::{Assembly, ClipboardSync, MAX_CLIPBOARD};
     use std::{sync::mpsc, time::Instant};
     struct Activity {
@@ -149,13 +189,16 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
     }));
     let alive = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::sync_channel(32);
+    let negotiated = channel.negotiated;
     let Channel {
         mut reader,
         mut writer,
         shutdown,
+        ..
     } = channel;
     let a = activity.clone();
     let running = alive.clone();
+    let reader_lease = lease.clone();
     let reader_thread = thread::spawn(move || {
         while running.load(Ordering::SeqCst) {
             let Ok(msg) = reader.recv() else {
@@ -177,6 +220,8 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                     }
                 }
                 Message::Active { visible, clipboard } => {
+                    let visible = visible && negotiated.screen;
+                    let clipboard = clipboard && negotiated.clipboard;
                     if visible != a.visible || clipboard != a.clipboard {
                         a.epoch += 1;
                     }
@@ -188,14 +233,22 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                     a.clipboard = clipboard;
                 }
                 Message::ReleaseAll => crate::inject::release(a.owner),
-                Message::Input(ev) if a.visible && a.ready => {
-                    if !crate::inject::event(a.owner, ev) {
+                Message::Input(ev) if a.visible && a.ready && negotiated.input => {
+                    if !reader_lease
+                        .dispatch(|| crate::inject::event(a.owner, ev))
+                        .unwrap_or(false)
+                    {
                         break;
                     }
                 }
-                Message::Absolute { x, y } if a.visible && a.ready => {
+                Message::Absolute { x, y } if a.visible && a.ready && negotiated.input => {
                     if let Some(d) = &a.display {
-                        crate::inject::absolute(a.owner, x, y, d);
+                        if reader_lease
+                            .dispatch(|| crate::inject::absolute(a.owner, x, y, d))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
                 msg @ Message::Clipboard { .. } if a.visible && a.ready && a.clipboard => {
@@ -440,7 +493,7 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
                     if let Some(bytes) = assembly.push(id, total, offset, &data, MAX_CLIPBOARD)? {
                         let text = String::from_utf8(bytes).map_err(io::Error::other)?;
                         if let Some(c) = &clipboard {
-                            if sync.remote(id, &text) && !c.write(&text) {
+                            if sync.remote(id, &text) && !lease.dispatch(|| c.write(&text))? {
                                 sync.reset(c.read());
                             }
                         }
@@ -489,9 +542,14 @@ fn run(channel: Channel, stop: &AtomicBool, initial_owner: u64) -> io::Result<()
     result
 }
 #[cfg(not(windows))]
-fn run(mut channel: Channel, stop: &AtomicBool, _owner: u64) -> io::Result<()> {
+fn run(
+    mut channel: Channel,
+    stop: &AtomicBool,
+    _owner: u64,
+    _lease: Arc<protocol::access::SessionLease>,
+) -> io::Result<()> {
     channel.writer.send(&Message::Status(
-        "Screen capture requires Windows; input-only mode is available.".into(),
+        "Bu adaptör ekran veya pano paylaşmıyor. Klavye/fare modu için çift Fn kullanın.".into(),
     ))?;
     while !stop.load(Ordering::SeqCst) {
         channel.reader.recv()?;
@@ -503,6 +561,47 @@ fn run(mut channel: Channel, stop: &AtomicBool, _owner: u64) -> io::Result<()> {
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
+    #[test]
+    fn revocation_and_identity_binding_cannot_displace_another_authenticated_controller() {
+        let _guard = crate::inject::TEST_CONTROLLER.lock().unwrap();
+        let access = AccessStore::in_memory("");
+        let key_a = protocol::secure::psk_from_secret(&access.grant("Mac A", "a").unwrap());
+        let key_b = protocol::secure::psk_from_secret(&access.grant("Mac B", "b").unwrap());
+        let credentials = access.authentication_keys();
+        let cfg = Config {
+            device_id: "pc".into(),
+            desktop_port: 0,
+            ..Default::default()
+        };
+        let handle = start_with_access(&cfg, access.clone(), Arc::new(|_| {})).unwrap();
+        let addr = ("127.0.0.1", handle.port);
+        let (mut a, _) =
+            Channel::connect(TcpStream::connect(addr).unwrap(), &key_a, "a", true).unwrap();
+        assert!(matches!(a.reader.recv().unwrap(), Message::Status(_)));
+        let (mut b, _) =
+            Channel::connect(TcpStream::connect(addr).unwrap(), &key_b, "b", true).unwrap();
+        assert!(matches!(b.reader.recv().unwrap(), Message::Status(_)));
+        assert!(a.reader.recv().is_err());
+        access
+            .revoke(&credentials.iter().find(|k| k.device_id == "a").unwrap().id)
+            .unwrap();
+        assert!(Channel::connect(TcpStream::connect(addr).unwrap(), &key_a, "a", true).is_err());
+        let (mut forged, _) = Channel::connect(
+            TcpStream::connect(addr).unwrap(),
+            &key_b,
+            "wrong-identity",
+            true,
+        )
+        .unwrap();
+        assert!(forged.reader.recv().is_err());
+        b.writer.send(&Message::Heartbeat).unwrap();
+        assert_eq!(b.reader.recv().unwrap(), Message::Heartbeat);
+        access
+            .revoke(&credentials.iter().find(|k| k.device_id == "b").unwrap().id)
+            .unwrap();
+        assert!(b.reader.recv().is_err());
+        drop(handle);
+    }
     #[test]
     fn authenticated_reconnect_survives_bad_key_and_port_collision_then_stops() {
         let _guard = crate::inject::TEST_CONTROLLER.lock().unwrap();

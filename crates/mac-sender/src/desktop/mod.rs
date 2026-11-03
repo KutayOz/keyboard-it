@@ -11,7 +11,7 @@ use std::{
     io,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex, OnceLock,
     },
     thread,
@@ -23,6 +23,7 @@ pub use viewer::{export_metrics, handle_event, open, release_ui};
 
 #[derive(Default)]
 pub struct Snapshot {
+    pub device_name: String,
     pub epoch: u64,
     pub status: String,
     pub display: Option<desktop::Display>,
@@ -31,6 +32,9 @@ pub struct Snapshot {
     pub received_clipboard: Option<(u64, String)>,
 }
 pub struct Shared {
+    /// Serializes publication of a session/message against target changes.
+    routing: Mutex<()>,
+    generation: AtomicU64,
     pub snapshot: Mutex<Snapshot>,
     pub frame: Mutex<Option<video::Frame>>,
     pub metrics: Mutex<metrics::Metrics>,
@@ -40,63 +44,119 @@ pub struct Shared {
     bulk: Mutex<Option<mpsc::SyncSender<Message>>>,
     socket: Mutex<Option<TcpStream>>,
     pub visible: AtomicBool,
+    pub viewer_armed: AtomicBool,
+    pub allow_screen: AtomicBool,
+    pub allow_input: AtomicBool,
+    pub allow_clipboard: AtomicBool,
     pub paused: AtomicBool,
     pub input_enabled: AtomicBool,
     pub desktop_mode: AtomicBool,
     pub clipboard: AtomicBool,
 }
-static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
-pub fn shared() -> &'static Arc<Shared> {
-    SHARED.get_or_init(|| {
-        Arc::new(Shared {
+impl Shared {
+    /// False means overflow/disconnection; close the socket so held inputs are released.
+    fn enqueue(&self, msg: Message) -> bool {
+        let _route = self.routing.lock().unwrap();
+        if (matches!(msg, Message::Input(_) | Message::Absolute { .. })
+            && !self.allow_input.load(Ordering::SeqCst))
+            || (matches!(msg, Message::Clipboard { .. })
+                && !self.allow_clipboard.load(Ordering::SeqCst))
+        {
+            return true;
+        }
+        let queue = if matches!(msg, Message::Clipboard { .. }) {
+            &self.bulk
+        } else {
+            &self.outgoing
+        };
+        queue
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|tx| tx.try_send(msg).is_ok())
+    }
+    fn new(cfg: &Config) -> Self {
+        let permissions = cfg.permissions();
+        Self {
+            routing: Mutex::new(()),
+            generation: AtomicU64::new(0),
             snapshot: Mutex::new(Snapshot {
-                status: "Windows bağlantısı hazırlanıyor…".into(),
+                status: "Cihaz bağlantısı hazırlanıyor…".into(),
                 ..Default::default()
             }),
             frame: Mutex::new(None),
             metrics: Mutex::new(Default::default()),
-            settings: Mutex::new(
-                Config::load()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .stream
-                    .normalized(),
-            ),
-            stats_visible: AtomicBool::new(
-                Config::load()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-                    .show_stream_stats,
-            ),
+            settings: Mutex::new(cfg.stream.normalized()),
+            stats_visible: AtomicBool::new(cfg.show_stream_stats),
             outgoing: Mutex::new(None),
             bulk: Mutex::new(None),
             socket: Mutex::new(None),
             visible: AtomicBool::new(false),
+            viewer_armed: AtomicBool::new(false),
+            allow_screen: AtomicBool::new(permissions.screen),
+            allow_input: AtomicBool::new(permissions.input),
+            allow_clipboard: AtomicBool::new(permissions.clipboard),
             paused: AtomicBool::new(false),
-            input_enabled: AtomicBool::new(true),
-            desktop_mode: AtomicBool::new(true),
-            clipboard: AtomicBool::new(true),
-        })
+            input_enabled: AtomicBool::new(permissions.input),
+            desktop_mode: AtomicBool::new(cfg.desktop_mode),
+            clipboard: AtomicBool::new(cfg.clipboard_enabled && permissions.clipboard),
+        }
+    }
+
+    fn current_generation(&self, generation: u64) -> io::Result<std::sync::MutexGuard<'_, ()>> {
+        let guard = self.routing.lock().unwrap();
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err(io::Error::other("Cihaz seçimi değişti"));
+        }
+        Ok(guard)
+    }
+
+    pub(crate) fn invalidate_target(&self) {
+        let _route = self.routing.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.visible.store(false, Ordering::SeqCst);
+        self.viewer_armed.store(false, Ordering::SeqCst);
+        self.input_enabled.store(false, Ordering::SeqCst);
+        self.outgoing.lock().unwrap().take();
+        self.bulk.lock().unwrap().take();
+        if let Some(socket) = self.socket.lock().unwrap().take() {
+            desktop::shutdown(&socket);
+        }
+        self.frame.lock().unwrap().take();
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.epoch += 1;
+        snap.connected = false;
+        snap.ready = false;
+        snap.display = None;
+        snap.device_name.clear();
+        snap.received_clipboard = None;
+        snap.status = "Cihaz değiştiriliyor…".into();
+    }
+}
+static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
+pub fn shared() -> &'static Arc<Shared> {
+    SHARED.get_or_init(|| {
+        Arc::new(Shared::new(
+            &Config::load().ok().flatten().unwrap_or_default(),
+        ))
     })
 }
 pub fn send(msg: Message) {
-    let queue = if matches!(msg, Message::Clipboard { .. }) {
-        &shared().bulk
-    } else {
-        &shared().outgoing
-    };
-    let failed = queue
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|tx| tx.try_send(msg).is_err());
     // Never discard a key-up or ReleaseAll silently. Closing the session makes
     // the receiver release held inputs and allows a clean reconnect.
-    if failed {
+    if !shared().enqueue(msg) {
         disconnect();
     }
+}
+
+/// Called on the main thread before changing selection or access. Old queues,
+/// frames and clipboard cannot be reused by the next authenticated session.
+pub fn prepare_target_change() {
+    crate::android::stop();
+    viewer::reset_target();
+    crate::capture::release_input();
+    shared().invalidate_target();
+    crate::capture::CONFIG_DIRTY.store(true, Ordering::SeqCst);
 }
 pub fn disconnect() {
     if let Some(s) = shared().socket.lock().unwrap().as_ref() {
@@ -106,6 +166,8 @@ pub fn disconnect() {
 }
 pub fn set_visible(visible: bool) {
     let s = shared();
+    let visible =
+        visible && s.allow_screen.load(Ordering::SeqCst) && s.viewer_armed.load(Ordering::SeqCst);
     if s.visible.swap(visible, Ordering::SeqCst) != visible {
         if !visible {
             send(Message::ReleaseAll);
@@ -129,7 +191,7 @@ pub fn toggle_mode() {
 }
 pub fn toggle_clipboard() {
     let s = shared();
-    let enabled = !s.clipboard.load(Ordering::SeqCst);
+    let enabled = !s.clipboard.load(Ordering::SeqCst) && s.allow_clipboard.load(Ordering::SeqCst);
     s.clipboard.store(enabled, Ordering::SeqCst);
     let _ = Config::update(|c| c.clipboard_enabled = enabled);
     send(Message::Active {
@@ -139,6 +201,7 @@ pub fn toggle_clipboard() {
 }
 pub fn set_profile(index: usize) {
     if let Some((_, settings)) = protocol::stream::StreamSettings::PROFILES.get(index) {
+        crate::android::stop();
         let _ = Config::update(|c| c.stream = *settings);
         *shared().settings.lock().unwrap() = *settings;
         shared().snapshot.lock().unwrap().ready = false;
@@ -158,6 +221,7 @@ pub fn toggle_connection() {
     let pause = !s.paused.load(Ordering::SeqCst);
     s.paused.store(pause, Ordering::SeqCst);
     if pause {
+        crate::android::stop();
         set_visible(false);
         disconnect();
     }
@@ -171,8 +235,31 @@ pub fn start() {
     thread::spawn(|| loop {
         let s = shared();
         let cfg = Config::load().ok().flatten().unwrap_or_default();
+        crate::android::update_selection(&cfg);
+        if cfg.android_selected() {
+            s.allow_input.store(false, Ordering::SeqCst);
+            s.allow_clipboard.store(false, Ordering::SeqCst);
+            s.clipboard.store(false, Ordering::SeqCst);
+            let status = crate::android::status();
+            let mut snap = s.snapshot.lock().unwrap();
+            snap.connected = status.running;
+            snap.ready = false;
+            snap.status = if status.message.is_empty() { "Android seçildi — Ekranı Aç".into() } else { status.message };
+            drop(snap);
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let permissions = cfg.permissions();
+        s.allow_screen.store(permissions.screen, Ordering::SeqCst);
+        s.allow_input.store(permissions.input, Ordering::SeqCst);
+        s.allow_clipboard
+            .store(permissions.clipboard, Ordering::SeqCst);
         s.desktop_mode.store(cfg.desktop_mode, Ordering::SeqCst);
-        s.clipboard.store(cfg.clipboard_enabled, Ordering::SeqCst);
+        s.clipboard.store(
+            cfg.clipboard_enabled && cfg.permissions().clipboard,
+            Ordering::SeqCst,
+        );
+        let generation = s.generation.load(Ordering::SeqCst);
         let configured =
             !cfg.peer_addrs().is_empty() && protocol::secure::psk_from_config_or_env(&cfg).is_ok();
         if !configured || !cfg.desktop_mode || s.paused.load(Ordering::SeqCst) {
@@ -189,6 +276,13 @@ pub fn start() {
         }
         crate::discovery::start();
         let result = connect(&cfg).and_then(|(channel, id, host, port)| {
+            let _route = s.routing.lock().unwrap();
+            let current = Config::load()?.unwrap_or_default();
+            if generation != s.generation.load(Ordering::SeqCst)
+                || current.session_target() != cfg.session_target()
+            {
+                return Err(io::Error::other("Cihaz seçimi değişti"));
+            }
             if !cfg.peer_device_id.is_empty() && cfg.peer_device_id != id {
                 return Err(io::Error::other(
                     "Eşleşmiş cihaz kimliği değişti; yeniden eşleştirin",
@@ -196,14 +290,23 @@ pub fn start() {
             }
             // Only an authenticated peer may update addresses. Never overwrite
             // a pairing the user changed while this connection was in flight.
+            let capabilities = channel.peer_capabilities.clone();
             let _ = Config::update(|c| {
-                if c.shared_secret == cfg.shared_secret && c.peer_host == cfg.peer_host {
+                if c.session_target() == cfg.session_target() {
                     c.peer_device_id = id;
                     c.peer_ip = host;
                     c.desktop_port = port;
+                    let active = c.active_device_id.clone();
+                    if let Some(device) = c.devices.iter_mut().find(|d| d.id == active) {
+                        if let Some(caps) = &capabilities {
+                            device.platform = caps.platform.clone();
+                        }
+                        device.capabilities = capabilities;
+                    }
                 }
             });
-            session(channel, &cfg)
+            drop(_route);
+            session(channel, &cfg, generation)
         });
         {
             let mut snap = s.snapshot.lock().unwrap();
@@ -243,7 +346,8 @@ fn connect(cfg: &Config) -> io::Result<(Channel, String, String, u16)> {
         for addr in addresses {
             match TcpStream::connect_timeout(&addr, Duration::from_millis(750)).and_then(|stream| {
                 *shared().socket.lock().unwrap() = Some(stream.try_clone()?);
-                Channel::connect(stream, &key, &cfg.device_id, true).map_err(|e| {
+                Channel::connect_with_capabilities(stream, &key, &cfg.device_id,
+                    &protocol::capabilities::Capabilities::controller(protocol::devices::Platform::Macos)).map_err(|e| {
                     if e.kind() == io::ErrorKind::UnexpectedEof || e.to_string().contains("version mismatch") {
                         io::Error::other(format!("Windows uygulamasının da 0.5.0 olduğundan emin olun; eski sürümde yalnız klavye/fare modunu kullanın ({e})"))
                     } else { e }
@@ -256,12 +360,33 @@ fn connect(cfg: &Config) -> io::Result<(Channel, String, String, u16)> {
     }
     Err(last)
 }
-fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
+fn session(channel: Channel, cfg: &Config, generation: u64) -> io::Result<()> {
+    let negotiated = channel.negotiated;
     let Channel {
         mut reader,
         mut writer,
         shutdown,
+        ..
     } = channel;
+    let route = shared().current_generation(generation)?;
+    let permissions = cfg.permissions();
+    shared()
+        .allow_screen
+        .store(permissions.screen && negotiated.screen, Ordering::SeqCst);
+    shared()
+        .allow_input
+        .store(permissions.input && negotiated.input, Ordering::SeqCst);
+    shared().allow_clipboard.store(
+        permissions.clipboard && negotiated.clipboard,
+        Ordering::SeqCst,
+    );
+    shared().clipboard.store(
+        cfg.clipboard_enabled && permissions.clipboard && negotiated.clipboard,
+        Ordering::SeqCst,
+    );
+    if !negotiated.input {
+        shared().input_enabled.store(false, Ordering::SeqCst);
+    }
     let (bulk_tx, bulk_rx) = mpsc::sync_channel::<Message>(32);
     *shared().bulk.lock().unwrap() = Some(bulk_tx);
     let (tx, rx) = mpsc::sync_channel::<Message>(256);
@@ -271,16 +396,27 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
         let mut snap = shared().snapshot.lock().unwrap();
         snap.epoch += 1;
         snap.connected = true;
+        snap.device_name = cfg
+            .active_device()
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| cfg.peer_host.clone());
         snap.ready = false;
-        snap.status = "Bağlandı — Windows’u Aç".into();
+        snap.status = if !negotiated.screen {
+            "Bu cihaz ekran paylaşımını desteklemiyor"
+        } else if !negotiated.input {
+            "Bağlandı — yalnız görüntüleme destekleniyor"
+        } else {
+            "Bağlandı — Ekranı Aç"
+        }
+        .into();
     }
     shared().metrics.lock().unwrap().reset();
+    drop(route);
     let settings = cfg.stream.normalized();
     *shared().settings.lock().unwrap() = settings;
     let running = Arc::new(AtomicBool::new(true));
     let alive = running.clone();
-    let secret = cfg.shared_secret.clone();
-    let host = cfg.peer_host.clone();
+    let target = cfg.session_target();
     let writer_thread = thread::spawn(move || {
         let mut beat = Instant::now() - Duration::from_secs(2);
         let visible = shared().visible.load(Ordering::SeqCst);
@@ -292,14 +428,17 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
             })
         });
         while result.is_ok() && alive.load(Ordering::SeqCst) {
-            if shared().paused.load(Ordering::SeqCst)
+            if generation != shared().generation.load(Ordering::SeqCst)
+                || shared().paused.load(Ordering::SeqCst)
                 || !shared().desktop_mode.load(Ordering::SeqCst)
             {
                 break;
             }
             if beat.elapsed() >= Duration::from_secs(1) {
                 let current = Config::load().ok().flatten().unwrap_or_default();
-                if current.shared_secret != secret || current.peer_host != host {
+                if current.session_target() != target {
+                    shared().invalidate_target();
+                    crate::capture::release_input();
                     break;
                 }
                 ping_id = ping_id.wrapping_add(1);
@@ -331,6 +470,7 @@ fn session(channel: Channel, cfg: &Config) -> io::Result<()> {
         let mut decoder = video::Decoder::default();
         loop {
             let msg = reader.recv()?;
+            let _route = shared().current_generation(generation)?;
             match msg {
                 Message::Heartbeat => {}
                 Message::Pong(id) => shared().metrics.lock().unwrap().pong(id),
@@ -442,6 +582,83 @@ fn connection_candidates(
     }
     Ok(candidates)
 }
+#[cfg(test)]
+mod switching_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn switching_closes_old_socket_and_discards_queues_clipboard_and_display() {
+        let s = Shared::new(&Config::default());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        *s.socket.lock().unwrap() = Some(client);
+        let (tx, _rx) = mpsc::sync_channel(4);
+        *s.outgoing.lock().unwrap() = Some(tx.clone());
+        *s.bulk.lock().unwrap() = Some(tx);
+        s.visible.store(true, Ordering::SeqCst);
+        s.viewer_armed.store(true, Ordering::SeqCst);
+        {
+            let mut snap = s.snapshot.lock().unwrap();
+            snap.connected = true;
+            snap.ready = true;
+            snap.received_clipboard = Some((1, "private clipboard".into()));
+        }
+        s.invalidate_target();
+        assert!(matches!(server.read(&mut [0]), Ok(0)));
+        assert!(s.outgoing.lock().unwrap().is_none());
+        assert!(s.bulk.lock().unwrap().is_none());
+        assert!(!s.visible.load(Ordering::SeqCst));
+        assert!(!s.viewer_armed.load(Ordering::SeqCst));
+        assert!(!s.input_enabled.load(Ordering::SeqCst));
+        let snap = s.snapshot.lock().unwrap();
+        assert!(!snap.ready && !snap.connected);
+        assert!(snap.received_clipboard.is_none() && snap.display.is_none());
+    }
+
+    #[test]
+    fn delayed_sessions_cannot_publish_after_a_target_change_or_a_return_to_it() {
+        let s = Shared::new(&Config::default());
+        let generation = s.generation.load(Ordering::SeqCst);
+        assert!(s.current_generation(generation).is_ok());
+        s.invalidate_target();
+        assert!(s.current_generation(generation).is_err());
+        s.invalidate_target();
+        assert!(s.current_generation(generation).is_err());
+        assert!(s
+            .current_generation(s.generation.load(Ordering::SeqCst))
+            .is_ok());
+    }
+
+    #[test]
+    fn permissions_block_input_and_clipboard_but_still_allow_release_all() {
+        let s = Shared::new(&Config::default());
+        let (tx, rx) = mpsc::sync_channel(4);
+        *s.outgoing.lock().unwrap() = Some(tx.clone());
+        *s.bulk.lock().unwrap() = Some(tx);
+        s.allow_input.store(false, Ordering::SeqCst);
+        s.allow_clipboard.store(false, Ordering::SeqCst);
+        assert!(s.enqueue(Message::Absolute { x: 1, y: 2 }));
+        assert!(s.enqueue(Message::Input(protocol::InputEvent::MouseMove {
+            dx: 1,
+            dy: 1
+        })));
+        assert!(s.enqueue(Message::Clipboard {
+            id: 1,
+            total: 1,
+            offset: 0,
+            data: vec![1]
+        }));
+        assert!(rx.try_recv().is_err());
+        assert!(s.enqueue(Message::ReleaseAll));
+        assert!(matches!(rx.try_recv().unwrap(), Message::ReleaseAll));
+    }
+}
+
 #[cfg(test)]
 mod rediscovery_tests {
     use super::*;

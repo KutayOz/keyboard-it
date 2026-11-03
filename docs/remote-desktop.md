@@ -4,12 +4,12 @@
 
 1. Install the updated `.dmg` on the Mac and `.msi` on Windows. Keep both computers on the
    same LAN. Windows must be awake, signed in, with its primary display active.
-2. Finish the Mac permissions guide. In Settings choose the Windows PC and Pair & Connect.
-   Compare the short code displayed on both computers, then approve on Windows.
+2. Finish the Mac permissions guide. In **Cihazlarım…** choose a discovered Windows PC and Pair & Connect.
+   Compare all eight fingerprint groups displayed on both computers, then approve on Windows.
 3. Start at login is selected by default during first setup. Windows asks for the scheduled
    task's permission once; declining it leaves the current pairing usable. Retry from
    Windows Settings if needed. The task runs in the interactive user session.
-4. Choose **Windows’u Aç** in the Mac menu bar. This first action opens a native full-screen
+4. Select a saved PC with **Bu Cihaza Geç**, then choose **Ekranı Aç** in the Mac menu bar. This first action opens a native full-screen
    Space visible in Mission Control. The green window button switches between full screen
    and a normal resizable window.
 5. While the viewer is focused and a current frame is visible, input goes to Windows.
@@ -28,6 +28,12 @@ separate Windows account/session or blank the physical monitor. Login, UAC's sec
 and a missing active monitor cannot be controlled. The viewer shows a status and retries
 capture when the normal desktop is restored. No additional Mac Screen Recording permission
 is required because the captured screen is on Windows.
+
+The shared host runtime now lives in `crates/device-host`; the Windows tray delegates
+to it. Updated peers negotiate authenticated capabilities before enabling screen/input/
+clipboard actions, and each newly approved controller has its own revocable key. Existing
+0.5.0 peers retain their original handshake. The macOS/Linux console adapters currently
+support input only; see [Universal device support](universal-devices.md).
 
 ## Picture quality and performance (0.5.0)
 
@@ -122,6 +128,7 @@ cargo test --workspace --locked
 cargo check --workspace --locked
 # macOS-only: exercise AppKit + VideoToolbox + AVSampleBufferDisplayLayer on the main thread
 cargo run -p mac-sender --locked -- --check-viewer
+cargo run -p mac-sender --locked -- --check-devices
 # Optional cross-platform type checking from macOS (install this Rust target first):
 cargo check -p win-receiver --target x86_64-pc-windows-gnu --tests --locked
 ```
@@ -158,3 +165,12 @@ becoming reachable; at 1080p/60 FPS, input-to-visible-response at or below 150 m
 measurement targets, not verified guarantees. Record hardware, effective resolution, encoder,
 network conditions and observed latency during physical-device validation. Headless/virtual
 monitors, WAN connectivity, audio, files and monitor selection are outside this version.
+
+## 0.6.0 pairing security
+
+New pairings use pairing v2 and require both apps at 0.6.0. Compare the entire fingerprint,
+not just the first group. Input/desktop versions and saved pairing credentials are unchanged.
+The input listener now waits for a valid transport event before replacing an active session.
+Updated controllers send a zero-motion event immediately. Older controllers only acquire
+ownership on their first event and may reconnect after a five-second idle proof timeout.
+See [security review](security-review.md) for reproducible evidence and remaining limits.

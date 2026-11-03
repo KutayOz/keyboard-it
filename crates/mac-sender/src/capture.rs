@@ -32,7 +32,7 @@ use core_graphics::event::{
     CGEventType, CallbackResult, EventField,
 };
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use objc2_app_kit::NSApplication;
@@ -68,6 +68,20 @@ const EVENT_QUEUE_CAP: usize = 128;
 /// about once a second and drops the current connection so the just-saved
 /// address/key applies immediately instead of when the old connection happens to die.
 pub static CONFIG_DIRTY: AtomicBool = AtomicBool::new(false);
+static INPUT_EPOCH: AtomicU64 = AtomicU64::new(0);
+static LEGACY_SOCKET: std::sync::Mutex<Option<std::net::TcpStream>> = std::sync::Mutex::new(None);
+static ACTIVE_FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
+pub fn release_input() {
+    INPUT_EPOCH.fetch_add(1, Ordering::SeqCst);
+    if let Some(flag) = ACTIVE_FLAG.get() {
+        flag.store(false, Ordering::SeqCst);
+    }
+    if let Some(socket) = LEGACY_SOCKET.lock().unwrap().take() {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
+    set_mouse_captured(false);
+}
 
 /// CGEventFlags mask that determines the down/up state of a modifier keycode.
 pub(crate) fn modifier_mask(kc: i64) -> Option<CGEventFlags> {
@@ -83,6 +97,7 @@ pub(crate) fn modifier_mask(kc: i64) -> Option<CGEventFlags> {
 }
 
 struct State {
+    epoch: u64,
     active: bool,
     fn_down: bool,
     last_fn_press: Option<Instant>,
@@ -112,7 +127,7 @@ fn config_ready(cfg: &protocol::config::Config) -> bool {
     protocol::secure::psk_from_config_or_env(cfg).is_ok() && !cfg.peer_addrs().is_empty()
 }
 
-pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
+pub fn run(cfg: protocol::config::Config, open_devices: bool) -> io::Result<()> {
     // Menu bar + event tap FIRST (main thread), connection in the BACKGROUND: the app
     // must not die silently when Windows is off or the config is empty.
     let mtm = MainThreadMarker::new()
@@ -131,6 +146,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // State flags: the tap callback and the connection thread (must be Send) write here;
     // a main-thread timer reads them and updates the menu bar title (objc2 objects are !Send).
     let active_flag = Arc::new(AtomicBool::new(false));
+    let _ = ACTIVE_FLAG.set(active_flag.clone());
     let conn_status = Arc::new(AtomicU8::new(initial_conn as u8));
     let permission_needed = Arc::new(AtomicBool::new(false));
     // Set only by install_permission_watcher: the permissions are there, the process
@@ -167,6 +183,8 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     const UNREACHABLE_AFTER: u32 = 5;
     let mut failed_rounds: u32 = 0;
     thread::spawn(move || loop {
+        LEGACY_SOCKET.lock().unwrap().take();
+        let input_epoch = INPUT_EPOCH.load(Ordering::SeqCst);
         // Clear the dirty flag BEFORE reading the config: if a Save lands after this
         // point the flag stays set and the send loop below drops the connection within
         // a second — no Save is ever missed (worst case one redundant reconnect).
@@ -178,7 +196,18 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             .ok()
             .flatten()
             .unwrap_or_default();
-        if cfg.desktop_mode || crate::desktop::shared().paused.load(Ordering::SeqCst) {
+        crate::android::update_selection(&cfg);
+        if cfg.android_selected() {
+            let status = crate::android::status();
+            conn_bg.store(if status.running { ConnStatus::Connected } else if status.starting { ConnStatus::Connecting } else { ConnStatus::Disconnected } as u8, Ordering::Relaxed);
+            for _ in rx.try_iter() {}
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        if cfg.desktop_mode
+            || !cfg.permissions().input
+            || crate::desktop::shared().paused.load(Ordering::SeqCst)
+        {
             let snap = crate::desktop::shared().snapshot.lock().unwrap();
             let status = if !config_ready(&cfg) {
                 ConnStatus::ConfigNeeded
@@ -252,6 +281,28 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                 continue;
             }
         };
+        // Confirm the fresh transport key before the host transfers input ownership.
+        // Zero relative motion also works with older input-only receivers.
+        if protocol::secure::send_event(&mut transport, &mut stream,
+            &protocol::InputEvent::MouseMove { dx: 0, dy: 0 }).is_err() {
+            conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
+            continue;
+        }
+        let target = cfg.session_target();
+        {
+            let mut socket = LEGACY_SOCKET.lock().unwrap();
+            if input_epoch != INPUT_EPOCH.load(Ordering::SeqCst) {
+                continue;
+            }
+            *socket = stream.try_clone().ok();
+        }
+        if protocol::config::Config::load()
+            .ok()
+            .flatten()
+            .is_none_or(|c| c.session_target() != target)
+        {
+            continue;
+        }
         println!("connected (encrypted, Noise NNpsk0): {addr}");
         conn_bg.store(ConnStatus::Connected as u8, Ordering::Relaxed);
         // Anything queued during the outage is stale — drain before sending.
@@ -268,6 +319,9 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             }
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(ev) => {
+                    if CONFIG_DIRTY.load(Ordering::SeqCst) {
+                        break;
+                    }
                     if protocol::secure::send_event(&mut transport, &mut stream, &ev).is_err() {
                         eprintln!("connection lost — reconnecting...");
                         conn_bg.store(ConnStatus::Disconnected as u8, Ordering::Relaxed);
@@ -285,7 +339,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // its own timer. When both tap permissions are already granted nothing opens and
     // startup stays silent — no window, no dialog, no mDNS browse.
     let permissions_ok = permissions::tap_permissions_granted();
-    if !permissions_ok {
+    if !permissions_ok && !cfg.android_selected() {
         permissions::open(mtm);
     }
 
@@ -296,7 +350,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // launch with missing permissions ends in a restart anyway, and initial_conn is
     // still ConfigNeeded after it — the alert simply arrives one launch later, with a
     // working app behind it.
-    if permissions_ok && initial_conn == ConnStatus::ConfigNeeded {
+    if permissions_ok && initial_conn == ConnStatus::ConfigNeeded && !open_devices {
         let open = menubar::show_setup_alert(
             mtm,
             "keyboard-it — first-run setup",
@@ -313,6 +367,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     }
 
     let state = RefCell::new(State {
+        epoch: INPUT_EPOCH.load(Ordering::SeqCst),
         active: false,
         fn_down: false,
         last_fn_press: None,
@@ -350,6 +405,19 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             CGEventType::ScrollWheel,
         ],
         move |_proxy, event_type, event: &CGEvent| -> CallbackResult {
+            {
+                let mut st = state.borrow_mut();
+                let epoch = INPUT_EPOCH.load(Ordering::SeqCst);
+                if st.epoch != epoch {
+                    st.epoch = epoch;
+                    st.active = false;
+                    st.fn_down = false;
+                    st.last_fn_press = None;
+                    st.held.clear();
+                    set_mouse_captured(false);
+                    flag_cb.store(false, Ordering::SeqCst);
+                }
+            }
             // If the system disabled the tap (timeout/user input), re-enable at once:
             // otherwise the double-Fn toggle dies silently and the app is unusable.
             if matches!(
@@ -377,6 +445,13 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
                     flag_cb.store(false, Ordering::Relaxed);
                 }
                 return result;
+            }
+            if crate::android::SELECTED.load(Ordering::SeqCst) {
+                let mut st = state.borrow_mut();
+                if st.active { set_mouse_captured(false); }
+                st.active = false; st.held.clear(); st.last_fn_press = None;
+                flag_cb.store(false, Ordering::Relaxed);
+                return CallbackResult::Keep;
             }
             let kc = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
             let mut st = state.borrow_mut();
@@ -614,7 +689,7 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
             // binary. Hand that to the window rather than a modal alert: an NSAlert
             // opened here runs a nested modal session that suppresses the very window
             // its own button would go on to open.
-            if permissions_ok {
+            if permissions_ok && !cfg.android_selected() {
                 permissions::note_stale_grant();
                 permissions::open(mtm);
             }
@@ -634,6 +709,9 @@ pub fn run(cfg: protocol::config::Config) -> io::Result<()> {
     // the same main-thread CFRunLoop; the source is in kCFRunLoopCommonModes, so the tap
     // also fires under NSApp.
     let app = NSApplication::sharedApplication(mtm);
+    if open_devices {
+        crate::settings::open(mtm);
+    }
     app.run();
 
     drop(menu_bar); // keep the handles alive up to this point

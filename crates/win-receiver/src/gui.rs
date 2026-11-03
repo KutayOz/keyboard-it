@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use protocol::access::AccessStore;
 use protocol::config::{Config, Role};
 use protocol::pairing::{code_display, PairRequest};
 
@@ -77,9 +78,8 @@ fn io_err<E: std::fmt::Display>(e: E) -> std::io::Error {
 /// Fold the settings window fields into the live config.
 ///
 /// Mutates in place rather than building a fresh `Config`: the window only owns
-/// the port and knows nothing about `shared_secret` — which is generated at
-/// first run and handed out by pairing. Rebuilding the struct from UI fields
-/// would silently wipe it and un-pair every Mac on the next Save.
+/// the port. Preserve identity and legacy configuration; individual controller
+/// credentials are managed separately by AccessStore.
 fn apply_ui(cfg: &mut Config, w: &SettingsWindow) {
     cfg.role = Role::Receiver;
     cfg.port = w
@@ -89,12 +89,70 @@ fn apply_ui(cfg: &mut Config, w: &SettingsWindow) {
         .unwrap_or(protocol::DEFAULT_PORT);
 }
 
+fn refresh_controllers(window: &SettingsWindow, access: &AccessStore) {
+    let rows: Vec<_> = access
+        .controllers()
+        .into_iter()
+        .map(|c| ControllerEntry {
+            id: c.id.into(),
+            name: c.name.into(),
+        })
+        .collect();
+    window.set_controllers(slint::ModelRc::new(slint::VecModel::from(rows)));
+}
+
 /// `cfg_warning`: error from loading the config at startup (if any) — release builds have
 /// no console, so the user sees it here (status line).
 pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     let tray = Tray::new().map_err(io_err)?;
     let settings = SettingsWindow::new().map_err(io_err)?;
     let pair_win = PairRequestWindow::new().map_err(io_err)?;
+    let access = match AccessStore::open(&cfg) {
+        Ok(store) => store,
+        Err(e) => {
+            settings.set_access_ready(false);
+            tray.set_access_ready(false);
+            settings.set_status_line(
+                format!("Erişim kayıtları açılamadı; bağlantılar başlatılmadı: {e}").into(),
+            );
+            let sw = settings.as_weak();
+            tray.on_show_settings(move || {
+                if let Some(w) = sw.upgrade() {
+                    let _ = w.show();
+                }
+            });
+            tray.on_quit(|| {
+                let _ = slint::quit_event_loop();
+            });
+            settings.window().on_close_requested(|| {
+                let _ = slint::quit_event_loop();
+                slint::CloseRequestResponse::HideWindow
+            });
+            settings.show().map_err(io_err)?;
+            tray.show().map_err(io_err)?;
+            return slint::run_event_loop().map_err(io_err);
+        }
+    };
+    refresh_controllers(&settings, &access);
+    let controller_timer = slint::Timer::default();
+    {
+        let sw = settings.as_weak();
+        let access = access.clone();
+        let mut previous = access.controllers();
+        controller_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(1),
+            move || {
+                let current = access.controllers();
+                if current != previous {
+                    previous = current;
+                    if let Some(w) = sw.upgrade() {
+                        refresh_controllers(&w, &access);
+                    }
+                }
+            },
+        );
+    }
 
     pair_win.set_offer_startup(!cfg.startup_configured);
     settings.set_listen_port(cfg.port.to_string().into());
@@ -115,9 +173,8 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     };
     settings.set_this_pc(format!("This PC: {} — {}", crate::netinfo::hostname(), ip_text).into());
 
-    // The authoritative config. Kept in memory rather than re-read from disk on
-    // every Save, so a first-run key that could not be written still works for
-    // this session instead of vanishing on the next restart of the listener.
+    // UI settings only. AccessStore owns credentials independently, so a settings
+    // save cannot reintroduce a revoked key.
     let cfg_cell: Rc<RefCell<Config>> = Rc::new(RefCell::new(cfg.clone()));
 
     // Listener handle — lives on the UI thread (Rc, not Send; fine here).
@@ -165,7 +222,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
             if let Some(s) = sw.upgrade() {
                 s.set_status_line(
                     if delivered {
-                        "Pairing approved — the Mac can connect now."
+                        "İzin verildi — eşleştirme tamamlanıyor."
                     } else {
                         EXPIRED_MSG
                     }
@@ -305,6 +362,7 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         let sw = settings.as_weak();
         let cfg_cell = cfg_cell.clone();
         let decide = decide.clone();
+        let access = access.clone();
         Rc::new(move || {
             let existing = listener.borrow_mut().take();
             if let Some(mut h) = existing {
@@ -362,8 +420,36 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
                 }
             };
 
-            match serve::start(&cfg, on_conn, decide.clone()) {
+            let pairing_feedback: serve::PairFeedback = {
+                let sw = sw.clone();
+                Arc::new(move |notice| {
+                    let sw = sw.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = sw.upgrade() {
+                            w.set_status_line(
+                                match notice {
+                                    serve::PairingNotice::Saved(name) => format!(
+                                        "{name} eşleştirildi; cihazın ayrı erişimi kaydedildi."
+                                    ),
+                                    serve::PairingNotice::Failed(e) => {
+                                        format!("Eşleştirme tamamlanamadı: {e}")
+                                    }
+                                }
+                                .into(),
+                            );
+                        }
+                    });
+                })
+            };
+            match serve::start_with_feedback(
+                &cfg,
+                access.clone(),
+                on_conn,
+                decide.clone(),
+                pairing_feedback,
+            ) {
                 Ok(h) => {
+                    s.set_listen_port(h.port.to_string().into());
                     *listener.borrow_mut() = Some(h);
                     if let Some(t) = tw.upgrade() {
                         t.set_active(true);
@@ -478,28 +564,31 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
     }
     {
         let sw = settings.as_weak();
-        let listener = listener.clone();
-        let start = do_start.clone();
-        let cfg_cell = cfg_cell.clone();
+        let access = access.clone();
         settings.on_forget_devices(move || {
             let Some(s) = sw.upgrade() else { return };
-            // A new key is what actually un-pairs: every Mac still holding the
-            // old one now fails the handshake.
-            let cfg = {
-                let mut c = cfg_cell.borrow_mut();
-                c.shared_secret = protocol::secure::generate_key();
-                c.clone()
-            };
-            match cfg.save() {
-                Ok(_) => {
-                    s.set_status_line("Paired Macs forgotten — pair again from each Mac.".into());
-                    // The listener holds the OLD key until it is restarted, and so
-                    // does the pairing listener that would hand it out.
-                    if listener.borrow().is_some() {
-                        start();
-                    }
+            match access.revoke_all() {
+                Ok(()) => {
+                    refresh_controllers(&s, &access);
+                    s.set_status_line(
+                        "Tüm cihaz erişimleri kaldırıldı. Yeniden eşleştirme gerekiyor.".into(),
+                    );
                 }
-                Err(e) => s.set_status_line(format!("Could not save: {e}").into()),
+                Err(e) => s.set_status_line(format!("Erişimler kaldırılamadı: {e}").into()),
+            }
+        });
+    }
+    {
+        let sw = settings.as_weak();
+        let access = access.clone();
+        settings.on_revoke_controller(move |id| {
+            let Some(s) = sw.upgrade() else { return };
+            match access.revoke(id.as_str()) {
+                Ok(()) => {
+                    refresh_controllers(&s, &access);
+                    s.set_status_line("Seçili cihazın erişimi kaldırıldı.".into());
+                }
+                Err(e) => s.set_status_line(format!("Erişim kaldırılamadı: {e}").into()),
             }
         });
     }
@@ -554,16 +643,9 @@ pub fn run(cfg: Config, cfg_warning: Option<String>) -> std::io::Result<()> {
         });
     }
 
-    // Start automatically at launch if a secret exists (config or env). main()
-    // mints one on first run, so in practice this is always true — being visible
-    // on the network is the whole point, and a PC nobody can find cannot be paired.
-    let have_secret = !cfg.shared_secret.is_empty()
-        || std::env::var("KEYBOARD_IT_KEY")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-    if have_secret {
-        do_start();
-    }
+    // An empty access list is still pairable. Newly installed receivers have
+    // no shared key and must be discoverable before their first approval.
+    do_start();
 
     // If the config could not be read the user must see it: write the warning to the
     // status line and open the settings window (the tray still works normally).

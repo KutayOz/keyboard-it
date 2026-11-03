@@ -140,6 +140,7 @@ define_class!(
         // terminate: (Quit menu item) fires on the main thread right before exit.
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            crate::android::stop();
             crate::desktop::release_ui();
             crate::desktop::disconnect();
             reassociate_cursor();
@@ -255,7 +256,7 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
         .flatten()
         .unwrap_or_default();
     for (title, action, checked) in [
-        ("Windows’u Aç", sel!(openDesktop:), false),
+        ("Ekranı Aç", sel!(openDesktop:), false),
         (
             "Yalnız klavye/fare modu",
             sel!(toggleDesktopMode:),
@@ -331,7 +332,7 @@ pub fn setup(mtm: MainThreadMarker, initial_active: bool, initial_conn: ConnStat
     let settings = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
-            ns_string!("Settings..."),
+            ns_string!("Cihazlarım…"),
             Some(sel!(settings:)),
             ns_string!(","),
         )
@@ -389,6 +390,7 @@ pub fn install_status_updater(
     // None = write once on the first tick, whatever the initial title from setup() was.
     let last: Cell<Option<(bool, u8, bool, bool)>> = Cell::new(None);
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        crate::android::show_pending_error(mtm);
         let now = (
             active.load(Ordering::Relaxed)
                 || (crate::desktop::shared().visible.load(Ordering::SeqCst)
@@ -397,8 +399,8 @@ pub fn install_status_updater(
                         .load(Ordering::SeqCst)
                     && crate::desktop::shared().snapshot.lock().unwrap().ready),
             conn.load(Ordering::Relaxed),
-            permission_needed.load(Ordering::Relaxed),
-            restart_needed.load(Ordering::Relaxed),
+            permission_needed.load(Ordering::Relaxed) && !crate::android::SELECTED.load(Ordering::SeqCst),
+            restart_needed.load(Ordering::Relaxed) && !crate::android::SELECTED.load(Ordering::SeqCst),
         );
         // Settings and opening the viewer can change these without clicking the
         // corresponding menu item; always reflect the authoritative state.

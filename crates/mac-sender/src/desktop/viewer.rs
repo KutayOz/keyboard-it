@@ -37,6 +37,7 @@ struct Ivars {
     last_active: Cell<bool>,
     last_frame: Cell<Option<Instant>>,
     last_connection: Cell<u64>,
+    last_target: Cell<u64>,
     last_clipboard: Cell<bool>,
     cursor_hidden: Cell<bool>,
     display_link: RefCell<Option<Retained<CADisplayLink>>>,
@@ -84,7 +85,7 @@ impl Viewer {
             )
         };
         unsafe { window.setReleasedWhenClosed(false) };
-        window.setTitle(ns_string!("Windows — keyboard-it"));
+        window.setTitle(ns_string!("Uzak cihaz — keyboard-it"));
         window.center();
         window.setAcceptsMouseMovedEvents(true);
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
@@ -99,8 +100,7 @@ impl Viewer {
         }
         view.setLayer(Some(&layer));
         window.setContentView(Some(&view));
-        let label =
-            NSTextField::labelWithString(ns_string!("Windows bağlantısı hazırlanıyor…"), mtm);
+        let label = NSTextField::labelWithString(ns_string!("Cihaz bağlantısı hazırlanıyor…"), mtm);
         label.setTextColor(Some(&NSColor::whiteColor()));
         label.setFrame(NSRect::new(NSPoint::new(20., 20.), NSSize::new(1100., 22.)));
         view.addSubview(&label);
@@ -121,6 +121,7 @@ impl Viewer {
             last_active: Cell::new(false),
             last_frame: Cell::new(None),
             last_connection: Cell::new(0),
+            last_target: Cell::new(0),
             last_clipboard: Cell::new(true),
             cursor_hidden: Cell::new(false),
             display_link: RefCell::new(None),
@@ -254,7 +255,19 @@ impl Viewer {
     fn update(&self) {
         let s = shared();
         let iv = self.ivars();
+        let generation = s.generation.load(Ordering::SeqCst);
+        if iv.last_target.replace(generation) != generation {
+            unsafe {
+                let _: () = msg_send![&*iv.layer, flushAndRemoveImage];
+            }
+            iv.last_frame.set(None);
+            iv.clipboard.borrow_mut().reset(read_clipboard());
+            FN.with(|state| *state.borrow_mut() = (false, None));
+            iv.window.setTitle(ns_string!("Uzak cihaz — keyboard-it"));
+        }
         let active = self.focused()
+            && s.viewer_armed.load(Ordering::SeqCst)
+            && s.allow_screen.load(Ordering::SeqCst)
             && s.desktop_mode.load(Ordering::SeqCst)
             && !s.paused.load(Ordering::SeqCst);
         if active != iv.last_active.replace(active) {
@@ -334,15 +347,24 @@ impl Viewer {
             }
         }
         let snap = s.snapshot.lock().unwrap();
-        let cursor_active =
-            active && snap.ready && snap.connected && s.input_enabled.load(Ordering::SeqCst);
+        let cursor_active = active
+            && snap.ready
+            && snap.connected
+            && s.input_enabled.load(Ordering::SeqCst)
+            && s.allow_input.load(Ordering::SeqCst);
         if let Some(d) = &snap.display {
             iv.window.setTitle(&NSString::from_str(&format!(
-                "Windows — {} × {} — keyboard-it",
-                d.width, d.height
+                "{} — {} × {} — keyboard-it",
+                snap.device_name, d.width, d.height
             )));
         }
-        let text = if !s.input_enabled.load(Ordering::SeqCst) {
+        let text = if !s.viewer_armed.load(Ordering::SeqCst) {
+            "Menüden Ekranı Aç ile seçili cihazı açın"
+        } else if !s.allow_screen.load(Ordering::SeqCst) {
+            &snap.status
+        } else if !s.allow_input.load(Ordering::SeqCst) {
+            "Klavye / fare izni kapalı — yalnız görüntüleme"
+        } else if !s.input_enabled.load(Ordering::SeqCst) {
             "Kontrol bırakıldı — çift Fn ile geri al"
         } else {
             &snap.status
@@ -361,7 +383,39 @@ pub fn release_ui() {
         }
     });
 }
+pub fn reset_target() {
+    release_ui();
+    FN.with(|state| *state.borrow_mut() = (false, None));
+    VIEWER.with(|slot| {
+        if let Some(v) = slot.borrow().as_ref() {
+            unsafe {
+                let _: () = msg_send![&*v.ivars().layer, flushAndRemoveImage];
+            }
+            v.ivars()
+                .window
+                .setTitle(ns_string!("Uzak cihaz — keyboard-it"));
+        }
+    });
+}
 pub fn open(mtm: MainThreadMarker) {
+    let cfg = protocol::config::Config::load()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if cfg.android_selected() { crate::android::open_viewer(mtm); return; }
+    if !cfg.permissions().screen {
+        crate::menubar::show_alert(
+            mtm,
+            "Ekran izni kapalı",
+            "Cihazlarım ekranından bu cihazın ekran iznini açın.",
+        );
+        return;
+    }
+    shared().input_enabled.store(
+        cfg.permissions().input && shared().allow_input.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    shared().viewer_armed.store(true, Ordering::SeqCst);
     if !shared().desktop_mode.load(Ordering::SeqCst) {
         super::toggle_mode();
     }
@@ -426,7 +480,8 @@ pub fn handle_event(kind: CGEventType, event: &CGEvent) -> Option<CallbackResult
         let Some(v) = slot.as_ref() else {
             return CallbackResult::Keep;
         };
-        if !v.focused() || s.paused.load(Ordering::SeqCst) {
+        if !v.focused() || !s.viewer_armed.load(Ordering::SeqCst) || s.paused.load(Ordering::SeqCst)
+        {
             if s.visible.load(Ordering::SeqCst) {
                 v.deactivate();
             }
@@ -444,7 +499,8 @@ pub fn handle_event(kind: CGEventType, event: &CGEvent) -> Option<CallbackResult
                         .1
                         .is_some_and(|t| t.elapsed() < Duration::from_millis(400))
                     {
-                        let enabled = !s.input_enabled.load(Ordering::SeqCst);
+                        let enabled = !s.input_enabled.load(Ordering::SeqCst)
+                            && s.allow_input.load(Ordering::SeqCst);
                         s.input_enabled.store(enabled, Ordering::SeqCst);
                         send(Message::ReleaseAll);
                         st.1 = None;
@@ -456,7 +512,8 @@ pub fn handle_event(kind: CGEventType, event: &CGEvent) -> Option<CallbackResult
             });
             return CallbackResult::Drop;
         }
-        if !s.input_enabled.load(Ordering::SeqCst)
+        if !s.allow_input.load(Ordering::SeqCst)
+            || !s.input_enabled.load(Ordering::SeqCst)
             || !{
                 let snap = s.snapshot.lock().unwrap();
                 snap.ready && snap.connected
