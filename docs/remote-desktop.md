@@ -166,9 +166,9 @@ measurement targets, not verified guarantees. Record hardware, effective resolut
 network conditions and observed latency during physical-device validation. Headless/virtual
 monitors, WAN connectivity, audio, files and monitor selection are outside this version.
 
-## 0.6.0 pairing security
+## 0.6.1 pairing security
 
-New pairings use pairing v2 and require both apps at 0.6.0. Compare the entire fingerprint,
+New pairings use pairing v2 and require both apps at 0.6.1. Compare the entire fingerprint,
 not just the first group. Input/desktop versions and saved pairing credentials are unchanged.
 The input listener now waits for a valid transport event before replacing an active session.
 Updated controllers send a zero-motion event immediately. Older controllers only acquire

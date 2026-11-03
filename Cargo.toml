@@ -11,7 +11,7 @@ members = [
 # Single source of version truth: all crates inherit it (version.workspace = true),
 # so the dmg (mac) and msi (win) versions can never drift apart.
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 
 # Small single-file release exe for distribution (goes into the .msi).
 # Note: opt-level/lto affect the whole workspace (mac-sender included). panic="abort"

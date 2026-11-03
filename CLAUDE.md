@@ -87,7 +87,7 @@ Hello, never from mDNS names.
 Invariants that span several files — preserve them when changing behavior:
 
 - **Backward compatibility.** Legacy input v1 and stored credentials remain usable with older 0.5.0
-  receivers. New pairing deliberately requires v2 (both apps 0.6.0), with no downgrade
+  receivers. New pairing deliberately requires v2 (both apps 0.6.1), with no downgrade
   to the old six-digit fingerprint. New features ride on optional encrypted handshake feature bits
   (`secure::FEATURE_CAPABILITIES`) and optional pairing tails; bump a version constant only for
   truly incompatible changes. Old configs migrate in place (flat sender fields → one-entry
