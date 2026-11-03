@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>keyboard-it &#8212; Download</title>
-<meta name="description" content="keyboard-it — an encrypted software KVM: type on your MacBook keyboard and control your Windows PC over your LAN. Double-tap Fn to switch.">
+<meta name="description" content="keyboard-it — encrypted Windows remote desktop and keyboard/mouse control from your Mac, with paired devices and Android via ADB/scrcpy.">
 <link rel="icon" type="image/png" href="keyboard-it.png">
 <style>
   *, *::before, *::after { box-sizing: border-box; }
@@ -424,33 +424,38 @@
   <section class="hero">
     <img class="hero-icon reveal" src="keyboard-it.png" alt="keyboard-it">
     <h1 class="reveal">keyboard&#8209;it</h1>
-    <p class="tagline reveal">Your MacBook keyboard, on your Windows PC.</p>
-    <p class="hero-sub reveal">Encrypted software KVM over your LAN.
-      Double&#8209;tap <kbd>Fn</kbd> to switch.</p>
+    <p class="tagline reveal">Your Windows desktop, controlled from your Mac.</p>
+    <p class="hero-sub reveal">Encrypted screen, keyboard, mouse and text clipboard over your LAN.
+      Same network, no cloud account.</p>
   </section>
 
   <section class="download">
     <div class="dl-wrap reveal">
       <fieldset class="dl-box">
-        <legend>Download &#8212; v0.3.0</legend>
+        <legend>Download &#8212; v0.6.2</legend>
 
         <div class="dl-grid">
-          <!-- Versionless artifact names: the deploy copy pins them (see site/README.md). -->
+          <!-- Fixed-name assets are published by the release workflow (see site/README.md). -->
           <a class="dl-btn"
              href="https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-macos.dmg"
              download>
             <div class="dl-apple">&#63743;</div>
             <div class="dl-name">Download for macOS</div>
-            <div class="dl-meta">.dmg &#183; Apple Silicon &#183; 786 KB</div>
+            <div class="dl-meta">.dmg &#183; Apple Silicon</div>
           </a>
           <a class="dl-btn"
              href="https://github.com/KutayOz/keyboard-it/releases/latest/download/keyboard-it-windows-x64.msi"
              download>
             <div class="dl-winlogo"><span class="win-grid"><span></span><span></span><span></span><span></span></span></div>
             <div class="dl-name">Download for Windows</div>
-            <div class="dl-meta">.msi &#183; x64 &#183; 5.8 MB</div>
+            <div class="dl-meta">.msi &#183; x64</div>
           </a>
         </div>
+
+        <p class="step-text">Install v0.6.2 on both computers for new pairings. Saved pairing keys are preserved.
+          <a href="https://github.com/KutayOz/keyboard-it/releases/tag/v0.6.2">Release notes</a> &#183;
+          <a href="https://github.com/KutayOz/keyboard-it/releases/download/v0.6.2/SHA256SUMS">SHA-256 checksums</a> &#183;
+          <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/security-review.md">Security review</a></p>
 
         <div class="note">
           <span class="note-badge">!</span>
@@ -467,7 +472,7 @@
         <div class="term reveal">
           <div class="term-title">Alternative: one Terminal command</div>
           <code class="term-cmd">curl -fsSL https://kutayoz.github.io/keyboard-it/install-macos.sh | sh</code>
-          <div class="term-hint">Installed this way, the macOS Gatekeeper warning never appears.</div>
+          <div class="term-hint">Downloads a pinned release and verifies its SHA-256 checksum before installation. The app remains unsigned.</div>
         </div>
       </fieldset>
     </div>
@@ -479,8 +484,8 @@
     <div class="diagram reveal">
       <div class="node">
         <div class="art-mac"></div>
-        <div class="node-title">MacBook keyboard</div>
-        <div class="node-sub">+ trackpad</div>
+        <div class="node-title">Mac controller</div>
+        <div class="node-sub">screen + input viewer</div>
       </div>
       <div class="link">
         <div class="lock">&#128274;</div>
@@ -490,32 +495,37 @@
       <div class="node">
         <div class="art-win"></div>
         <div class="node-title">Windows PC</div>
-        <div class="node-sub">keyboard + mouse</div>
+        <div class="node-sub">existing desktop session</div>
       </div>
     </div>
 
     <div class="features reveal">
       <div class="feature">
         <span class="dot dot-green"></span>
-        <div class="feature-text"><strong>Encrypted end to end.</strong> Traffic secured with the
-          Noise protocol.</div>
+        <div class="feature-text"><strong>Encrypted native sessions.</strong> Noise protects screen, input and text clipboard.
+          Compare all eight fingerprint groups before approving a new pairing.</div>
       </div>
       <div class="feature">
         <span class="dot dot-blue"></span>
-        <div class="feature-text"><strong>Full input.</strong> Keyboard, mouse movement, and scroll
-          &#8212; all forwarded.</div>
+        <div class="feature-text"><strong>Windows remote desktop.</strong> Open the PC screen in a native Mac window or full-screen Space.
+          Windows must be awake, signed in and have an active monitor.</div>
       </div>
       <div class="feature">
         <span class="dot dot-blue"></span>
-        <div class="feature-text"><strong>Always at hand.</strong> Menu&#8209;bar /
-          system&#8209;tray indicator with login autostart.</div>
+        <div class="feature-text"><strong>Paired devices.</strong> Save multiple computers, choose the active device and revoke
+          individual controllers from Windows settings.</div>
       </div>
       <div class="feature">
         <span class="dot dot-green"></span>
-        <div class="feature-text"><strong>Correct layouts.</strong> Turkish&#8209;Q &amp; AltGr
-          handled via position&#8209;based key forwarding.</div>
+        <div class="feature-text"><strong>Keyboard and trackpad.</strong> Turkish&#8209;Q &amp; AltGr support, plus double&#8209;Fn switching
+          in keyboard/mouse-only mode.</div>
       </div>
     </div>
+    <p class="step-text"><strong>Android:</strong> add a phone from <em>Cihazlarım… → Android Ekle…</em>.
+      Requires separately installed ADB and scrcpy; use USB or Android 11+ Wireless debugging for encrypted Wi-Fi.
+      <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/android.md">Android setup and validation limits</a>.
+      macOS/Linux input-only hosts are available from source;
+      <a href="https://github.com/KutayOz/keyboard-it/blob/main/docs/universal-devices.md">host setup</a>.</p>
   </section>
 
   <section class="setup">
@@ -541,8 +551,9 @@
           <div>
             <div class="step-title">Pair them</div>
             <div class="step-text">Pick your PC from the list on the Mac and click
-              <em>Pair &amp; Connect</em>, then click <em>Allow</em> on Windows
-              &#8212; nothing to type, no keys or IP addresses to copy.</div>
+              <em>Pair &amp; Connect</em>. Compare <strong>all eight fingerprint groups</strong> on both screens,
+              then click <em>Allow</em> on Windows only if every group matches. Both devices must be on the same LAN;
+              guest Wi-Fi/client isolation can prevent discovery.</div>
           </div>
         </li>
         <li class="step">
@@ -556,9 +567,10 @@
         <li class="step">
           <span class="step-num done">4</span>
           <div>
-            <div class="step-title">Double&#8209;tap <span class="mono">Fn</span> to activate</div>
-            <div class="step-text">Your keyboard and trackpad now drive the Windows PC.
-              Double&#8209;tap again to come back.</div>
+            <div class="step-title">Open the screen</div>
+            <div class="step-text">Choose <em>Ekranı Aç</em> on the Mac. While the viewer is focused, input goes to Windows;
+              switch Spaces or apps to return to the Mac. For input-only control, enable
+              <em>Yalnız klavye/fare modu</em> and double&#8209;tap <span class="mono">Fn</span>.</div>
           </div>
         </li>
       </ol>

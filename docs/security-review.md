@@ -166,6 +166,16 @@ The fixture now obstructs the policy replacement path directly on all platforms.
 requires failed writes to preserve live access; no assertion was removed. Final publication
 uses 0.6.2. No released tag was rewritten.
 
+## Download/install hardening
+
+The terminal installer now pins both its DMG and checksum manifest to the same release,
+uses a private `mktemp -d` directory rather than predictable `/tmp` paths, and verifies the
+SHA-256 digest before mounting or replacing an existing app. A mocked-tool installer check
+covered success, mismatched digest, manifest download failure, a missing entry and duplicate
+entries; every failure left the previous fixture app intact and never mounted/copied/launched.
+No test installed over the user's real app. Checksums remain same-origin integrity checks,
+not a replacement for publisher signing.
+
 ## Remaining boundaries
 
 - A malicious router or LAN peer can drop/delay packets, jam discovery, occupy bounded handshake

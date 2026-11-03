@@ -71,15 +71,17 @@ launch.
 
 ### macOS
 
-Terminal install skips the Gatekeeper prompt entirely, because files downloaded with curl
-carry no quarantine flag:
+Alternatively, the terminal installer checks the pinned release's SHA-256 digest before
+mounting the image and installing the app:
 
 ```sh
 curl -fsSL https://kutayoz.github.io/keyboard-it/install-macos.sh | sh
 ```
 
-The script downloads the DMG from GitHub Releases, mounts it, copies `keyboard-it.app` to
-`/Applications`, and opens it.
+The script downloads the DMG and checksum manifest from the same GitHub Release, verifies
+it inside a private temporary directory, mounts it, copies `keyboard-it.app` to `/Applications`,
+and opens it. A missing/mismatched checksum stops installation. Files fetched by curl do not
+inherit browser quarantine; neither this behavior nor a checksum verifies publisher identity.
 
 If you install from the `.dmg` instead, macOS blocks the unsigned app on first open:
 
